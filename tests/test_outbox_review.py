@@ -24,17 +24,16 @@ from harvey.state import StateManager
 
 
 @pytest.fixture
-def client(monkeypatch):
-    with tempfile.TemporaryDirectory() as tmp:
-        db = Path(tmp) / "harvey.db"
-        monkeypatch.setattr(dash, "DB_PATH", db)
-        monkeypatch.setattr(dash, "WEB_DIR", Path(__file__).resolve().parent.parent / "harvey" / "web")
-        dash.token_store.configure(Path(tmp) / "data" / "dashboard-token")
-        token = dash.token_store.get()
-        with TestClient(dash.app, base_url="http://127.0.0.1:5555",
-                        headers={"Authorization": f"Bearer {token}"}) as c:
-            c.db_path = db
-            yield c
+def client(tmp_path, monkeypatch):
+    db = tmp_path / "harvey.db"
+    monkeypatch.setattr(dash, "DB_PATH", db)
+    monkeypatch.setattr(dash, "WEB_DIR", Path(__file__).resolve().parent.parent / "harvey" / "web")
+    dash.token_store.configure(tmp_path / "data" / "dashboard-token")
+    token = dash.token_store.get()
+    with TestClient(dash.app, base_url="http://127.0.0.1:5555",
+                    headers={"Authorization": f"Bearer {token}"}) as c:
+        c.db_path = db
+        yield c
 
 
 async def _seed(db_path, status="pending_review", kind="sequence"):

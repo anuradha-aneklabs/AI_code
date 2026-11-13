@@ -106,11 +106,20 @@ class Writer:
         state: StateManager,
         config: HarveyConfig,
         env=None,
+        rag=None,
     ):
         self.brain = brain
         self.state = state
         self.config = config
         self.env = env
+        if rag is not None:
+            self.rag = rag
+        else:
+            try:
+                from harvey.rag.retriever import RAGRetriever
+                self.rag = RAGRetriever()
+            except Exception:
+                self.rag = None
 
     @property
     def is_native(self) -> bool:
@@ -288,7 +297,7 @@ class Writer:
         )
 
         drafted = 0
-        for (prospect, _), draft in zip(pending, polished):
+        for (prospect, original_draft), draft in zip(pending, polished):
             item_id = await self.state.add_outbox_item(
                 prospect_id=prospect.id,
                 campaign_id=campaign_id,
@@ -303,6 +312,18 @@ class Writer:
             )
             if item_id:
                 drafted += 1
+                try:
+                    from harvey.rag.trace import record_rag_trace
+                    record_rag_trace(
+                        item_id=item_id,
+                        prospect_id=prospect.id,
+                        to_email=prospect.email,
+                        subject=draft["subject"],
+                        sources=original_draft.get("rag_sources", []),
+                        chunks=original_draft.get("rag_retrieved", []),
+                    )
+                except Exception as e:
+                    logger.warning(f"Failed to record RAG trace for item {item_id}: {e}")
 
         if drafted:
             logger.info(
@@ -393,11 +414,23 @@ class Writer:
             persona_role=self.config.persona.role,
             persona_tone=self.config.persona.tone,
         ) or ""
-        if self.skills:
+        if getattr(self, "skills", None):
             prompt += "\n\n" + self.skills
         if startup is not None:
             prompt += self._startup_playbook()
         prompt += await self._feedback_block([prospect.id])
+
+        # Grounded RAG knowledge retrieval
+        retrieved_chunks = []
+        if getattr(self, "rag", None):
+            try:
+                rag_chunks = await self.rag.retrieve_for_prospect(prospect, company=company)
+                retrieved_chunks = rag_chunks or []
+                rag_block = self.rag.format_prompt_context(retrieved_chunks)
+                if rag_block:
+                    prompt += rag_block
+            except Exception as e:
+                logger.warning(f"Writer: RAG retrieval failed: {e}")
         rules = getattr(self, "email_rules", "")
         prompt += operator_rules_block(rules)
         if rules:
@@ -439,7 +472,15 @@ Return ONLY JSON: {{"subject": "...", "body": "..."}}"""
         body = str(result.get("body") or "").strip()
         if not subject or not body:
             return None
-        return {"subject": subject[:120], "body": body[:2000]}
+        sources = [c["source"] for c in retrieved_chunks if c.get("source")]
+        chunk_ids = [c["chunk_id"] for c in retrieved_chunks if c.get("chunk_id")]
+        return {
+            "subject": subject[:120],
+            "body": body[:2000],
+            "rag_sources": sources,
+            "rag_chunks": chunk_ids,
+            "rag_retrieved": retrieved_chunks,
+        }
 
     async def _write_sequence(self, prospects: list) -> list[EmailStep]:
         """Ask the brain to write a 3-email sequence."""
@@ -485,7 +526,7 @@ Key benefits: {', '.join(self.config.product.key_benefits)}
 Pricing: {self.config.product.pricing}"""
 
         # Inject email framework skills
-        if self.skills:
+        if getattr(self, "skills", None):
             prompt += "\n\n" + self.skills
         # One template goes to the whole batch: founder framing only when
         # every prospect in it is a startup.

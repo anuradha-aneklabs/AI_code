@@ -1113,8 +1113,10 @@ class ProfileCollector:
         self.site_names[company_id] = site_name_from_html(home, domain)
 
         # Ads (they are spending TODAY — the strongest budget signal here)
-        add("RUNNING_GOOGLE_ADS", num=1 if self._any(home, GOOGLE_ADS) else 0)
-        add("RUNNING_META_ADS", num=1 if self._any(home, META_PIXEL) else 0)
+        has_gads = bool(self._any(home, GOOGLE_ADS))
+        has_mads = bool(self._any(home, META_PIXEL))
+        add("RUNNING_GOOGLE_ADS", num=1 if has_gads else 0, text="Detected" if has_gads else "Not detected")
+        add("RUNNING_META_ADS", num=1 if has_mads else 0, text="Detected" if has_mads else "Not detected")
 
         # Platform + tooling
         tech = self.detect_tech(home)
@@ -1151,7 +1153,7 @@ class ProfileCollector:
             # dropped claim doesn't last forever.
             searched = yc is None and await self._search_hit(company_id, "YC_BACKED")
             if yc is not None or not searched:
-                add("YC_BACKED", num=1 if yc else 0, text=yc[0] if yc else "",
+                add("YC_BACKED", num=1 if yc else 0, text=yc[0] if yc else "Not detected",
                     conf=yc[1] if yc else 1.0, url=where if yc else site)
 
         # Another accelerator, the same way. Unlike YC, a preset's search hit
@@ -1165,7 +1167,7 @@ class ProfileCollector:
                 if about_html:
                     programs, where = accelerators(about_html, domain), about_url
             add("ACCELERATOR", num=1 if programs else 0,
-                text="; ".join(f"{p} {c}".strip() for p, c, _ in programs),
+                text="; ".join(f"{p} {c}".strip() for p, c, _ in programs) if programs else "Not detected",
                 conf=max(c for _, _, c in programs) if programs else 1.0,
                 url=where if programs else site)
 
@@ -1188,7 +1190,7 @@ class ProfileCollector:
                 best, where = max(found, key=lambda fu: fu[0]["date"])
                 add("FUNDING_ROUND", num=1, text=funding_text(best), conf=best["conf"], url=where)
             else:
-                add("FUNDING_ROUND", num=0, url=site)
+                add("FUNDING_ROUND", num=0, text="Not detected", url=site)
 
         # Incumbent agency — the compounding signal
         agency = self.detect_agency(home, domain)
@@ -1204,6 +1206,7 @@ class ProfileCollector:
                 for bot in AI_CRAWLERS
             )
             add("BLOCKS_AI_CRAWLERS", num=1 if blocked else 0,
+                text="Blocked" if blocked else "Allowed",
                 url=f"{site}/robots.txt")
 
         # sitemap.xml → size + content freshness

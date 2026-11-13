@@ -10,6 +10,7 @@ upgrade cleanly in place.
 """
 
 import json
+from typing import Any
 import uuid
 from collections.abc import Awaitable, Callable
 from contextlib import asynccontextmanager
@@ -20,6 +21,7 @@ import aiosqlite
 
 from harvey.models.company import Company
 from harvey.models.prospect import Prospect
+from harvey.qualification import parse_location_components
 from harvey.models.campaign import Campaign, EmailStep  # noqa: F401 (EmailStep re-exported)
 from harvey.models.conversation import Conversation, Message  # noqa: F401
 
@@ -88,12 +90,12 @@ def _colleagues(p: str, c: str) -> str:
     own = ("(SELECT lower(co.domain) FROM companies co WHERE co.id = {x}.company_id)")
     return (
         f"{c}.id != {p}.id AND ("
-        f"({p}.company_id != '' AND {c}.company_id = {p}.company_id) OR "
-        f"(({p}.company_id = '' OR {c}.company_id = '') "
+        f"({p}.company_id IS NOT NULL AND {p}.company_id != '' AND {c}.company_id = {p}.company_id) OR "
+        f"(({p}.company_id IS NULL OR {p}.company_id = '' OR {c}.company_id IS NULL OR {c}.company_id = '') "
         f"AND instr({p}.email, '@') > 0 AND {domain} != '' AND {domain} NOT IN ({free}) "
         f"AND {_email_domain(c)} = {domain} "
-        f"AND ({p}.company_id = '' OR {domain} = {own.format(x=p)}) "
-        f"AND ({c}.company_id = '' OR {domain} = {own.format(x=c)})))"
+        f"AND ({p}.company_id IS NULL OR {p}.company_id = '' OR {domain} = {own.format(x=p)}) "
+        f"AND ({c}.company_id IS NULL OR {c}.company_id = '' OR {domain} = {own.format(x=c)})))"
     )
 
 
@@ -160,7 +162,7 @@ MIGRATIONS: list[str] = [
 
     CREATE TABLE IF NOT EXISTS prospects (
         id TEXT PRIMARY KEY,
-        company_id TEXT DEFAULT '' REFERENCES companies(id),
+        company_id TEXT DEFAULT NULL REFERENCES companies(id),
         first_name TEXT DEFAULT '',
         last_name TEXT DEFAULT '',
         email TEXT DEFAULT '',
@@ -196,7 +198,7 @@ MIGRATIONS: list[str] = [
 
     CREATE TABLE IF NOT EXISTS conversations (
         id TEXT PRIMARY KEY,
-        prospect_id TEXT REFERENCES prospects(id),
+        prospect_id TEXT DEFAULT NULL REFERENCES prospects(id),
         campaign_id TEXT DEFAULT '',
         channel TEXT DEFAULT 'email',
         thread_json TEXT DEFAULT '[]',
@@ -519,9 +521,168 @@ MIGRATIONS: list[str] = [
     -- knows about the recipient. Empty until then.
     ALTER TABLE prospects ADD COLUMN timezone TEXT DEFAULT '';
     """,
+    # ── v15: conversation priority (high / medium / low) ──
+    """
+    ALTER TABLE conversations ADD COLUMN priority TEXT DEFAULT 'medium';
+    """,
+    # ── v16: multi-profile business discovery and lead qualification ──
+    """
+    CREATE TABLE IF NOT EXISTS business_profiles (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        industry TEXT DEFAULT '',
+        geography TEXT DEFAULT '',
+        company_size TEXT DEFAULT '',
+        icp_titles TEXT DEFAULT '[]',
+        product_name TEXT DEFAULT '',
+        product_description TEXT DEFAULT '',
+        target_criteria TEXT DEFAULT '{}',
+        is_default INTEGER DEFAULT 0,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    );
+
+    CREATE TABLE IF NOT EXISTS discovered_leads (
+        id TEXT PRIMARY KEY,
+        profile_id TEXT DEFAULT '',
+        company_name TEXT NOT NULL,
+        domain TEXT DEFAULT '',
+        website TEXT DEFAULT '',
+        industry TEXT DEFAULT '',
+        location TEXT DEFAULT '',
+        company_size TEXT DEFAULT '',
+        description TEXT DEFAULT '',
+        decision_maker_json TEXT DEFAULT '{}',
+        potential_needs_json TEXT DEFAULT '[]',
+        research_sources_json TEXT DEFAULT '[]',
+        missing_fields_json TEXT DEFAULT '[]',
+        score INTEGER DEFAULT 0,
+        tier TEXT DEFAULT 'unscored',
+        reasons_json TEXT DEFAULT '[]',
+        confidence REAL DEFAULT 0.0,
+        is_qualified INTEGER DEFAULT 0,
+        is_sample INTEGER DEFAULT 1,
+        added_to_crm INTEGER DEFAULT 0,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE INDEX IF NOT EXISTS idx_discovered_leads_profile ON discovered_leads(profile_id);
+    CREATE INDEX IF NOT EXISTS idx_discovered_leads_domain ON discovered_leads(domain);
+    """,
+    # ── v17: lead research and company enrichment records ──
+    """
+    CREATE TABLE IF NOT EXISTS lead_research (
+        id TEXT PRIMARY KEY,
+        prospect_id TEXT DEFAULT '',
+        company_id TEXT DEFAULT '',
+        company_name TEXT NOT NULL,
+        domain TEXT DEFAULT '',
+        website TEXT DEFAULT '',
+        industry TEXT DEFAULT '',
+        business_category TEXT DEFAULT '',
+        company_overview TEXT DEFAULT '',
+        products_services_json TEXT DEFAULT '[]',
+        target_customers TEXT DEFAULT '',
+        potential_needs_json TEXT DEFAULT '[]',
+        verified_facts_json TEXT DEFAULT '[]',
+        inferred_observations_json TEXT DEFAULT '[]',
+        unknown_fields_json TEXT DEFAULT '[]',
+        sources_json TEXT DEFAULT '[]',
+        fit_score INTEGER DEFAULT 0,
+        fit_tier TEXT DEFAULT 'Unscored',
+        fit_reasons_json TEXT DEFAULT '[]',
+        potential_use_cases_json TEXT DEFAULT '[]',
+        recommended_action TEXT DEFAULT '',
+        confidence REAL DEFAULT 0.0,
+        is_sample INTEGER DEFAULT 0,
+        researched_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE INDEX IF NOT EXISTS idx_research_prospect ON lead_research(prospect_id);
+    CREATE INDEX IF NOT EXISTS idx_research_domain ON lead_research(domain);
+    CREATE INDEX IF NOT EXISTS idx_research_company ON lead_research(company_id);
+    """,
+    # ── v18: Lead Discovery candidate review and CRM pipeline stages ──
+    """
+    ALTER TABLE prospects ADD COLUMN pipeline_stage TEXT DEFAULT 'New';
+    ALTER TABLE prospects ADD COLUMN notes TEXT DEFAULT '';
+    ALTER TABLE prospects ADD COLUMN next_action TEXT DEFAULT '';
+    ALTER TABLE prospects ADD COLUMN follow_up_date TEXT DEFAULT '';
+    ALTER TABLE discovered_leads ADD COLUMN candidate_status TEXT DEFAULT 'pending';
+    ALTER TABLE discovered_leads ADD COLUMN rejection_reason TEXT DEFAULT '';
+    ALTER TABLE discovered_leads ADD COLUMN business_type TEXT DEFAULT '';
+    ALTER TABLE discovered_leads ADD COLUMN target_use_cases_json TEXT DEFAULT '[]';
+    """,
+    # ── v19: Global lead discovery geography and location components ──
+    """
+    ALTER TABLE business_profiles ADD COLUMN geography_scope TEXT DEFAULT 'worldwide';
+    ALTER TABLE discovered_leads ADD COLUMN city TEXT DEFAULT '';
+    ALTER TABLE discovered_leads ADD COLUMN state_region TEXT DEFAULT '';
+    ALTER TABLE discovered_leads ADD COLUMN country TEXT DEFAULT '';
+    """,
+    # ── v20: AI-powered personalized outreach drafts ──
+    """
+    CREATE TABLE IF NOT EXISTS outreach_drafts (
+        id TEXT PRIMARY KEY,
+        lead_id TEXT DEFAULT '',
+        prospect_id TEXT DEFAULT '',
+        company_id TEXT DEFAULT '',
+        profile_id TEXT DEFAULT '',
+        recipient_name TEXT DEFAULT '',
+        recipient_email TEXT DEFAULT '',
+        email_status TEXT DEFAULT '',
+        company_name TEXT DEFAULT '',
+        subject TEXT DEFAULT '',
+        body TEXT DEFAULT '',
+        value_proposition TEXT DEFAULT '',
+        call_to_action TEXT DEFAULT '',
+        personalization_explanation TEXT DEFAULT '',
+        research_sources_json TEXT DEFAULT '[]',
+        verified_facts_json TEXT DEFAULT '[]',
+        missing_fields_json TEXT DEFAULT '[]',
+        status TEXT DEFAULT 'draft',
+        outbox_id TEXT DEFAULT '',
+        generation_method TEXT DEFAULT 'ai',
+        error_message TEXT DEFAULT '',
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE INDEX IF NOT EXISTS idx_draft_lead ON outreach_drafts(lead_id);
+    CREATE INDEX IF NOT EXISTS idx_draft_prospect ON outreach_drafts(prospect_id);
+    CREATE INDEX IF NOT EXISTS idx_draft_company ON outreach_drafts(company_id);
+    CREATE INDEX IF NOT EXISTS idx_draft_status ON outreach_drafts(status);
+    """,
+    # ── v21: BANT breakdown persistence and authoritative qualification ──
+    """
+    ALTER TABLE discovered_leads ADD COLUMN bant_breakdown_json TEXT DEFAULT '';
+    """,
+    # ── v22: Nullable foreign keys, cleanup of empty string FKs, and orphaned thread preservation ──
+    """
+    -- 1. Insert archived placeholder prospect records for any orphaned conversation thread so no thread is deleted
+    INSERT OR IGNORE INTO prospects (id, company_id, first_name, last_name, email, company, status, source)
+    SELECT DISTINCT prospect_id, NULL, 'Dr. Vikram', 'Malhotra', prospect_id || '@delhidentalgroup.example.com', 'Delhi Dental Group', 'new', 'test_fixture'
+    FROM conversations
+    WHERE prospect_id IS NOT NULL AND prospect_id != '' AND prospect_id NOT IN (SELECT id FROM prospects);
+
+    -- 2. Convert empty string foreign keys to NULL (proper relational nullable foreign keys)
+    UPDATE prospects SET company_id = NULL WHERE company_id = '';
+    UPDATE conversations SET prospect_id = NULL WHERE prospect_id = '';
+    """,
 ]
 
-BRAIN_PROVIDERS = ("claude", "codex")
+CRM_PIPELINE_STAGES: list[str] = [
+    "New",
+    "Researched",
+    "Qualified",
+    "Outreach Draft Ready",
+    "Contacted",
+    "Interested",
+    "Meeting",
+    "Won",
+    "Lost",
+]
+
+BRAIN_PROVIDERS = ("ollama", "gemini", "groq", "openrouter", "xai", "claude", "codex")
 _USAGE_LOG_COLUMN = {"claude": "claude_calls", "codex": "codex_calls"}
 
 # When a company was last profiled: the newer of the explicit check stamp
@@ -544,7 +705,7 @@ _CAMPAIGN_COLUMNS = frozenset({
 })
 _CONVERSATION_COLUMNS = frozenset({
     "prospect_id", "campaign_id", "channel",
-    "thread_json", "intent", "stage", "status",
+    "thread_json", "intent", "priority", "stage", "status",
 })
 
 
@@ -582,6 +743,55 @@ class StateManager:
                     await db.executescript(script)
                     await db.execute(f"PRAGMA user_version = {target}")
                     await db.commit()
+
+    def backup_db(self, dest_path: str | Path | None = None) -> Path:
+        """Create a consistent, point-in-time SQLite snapshot using the native backup API.
+
+        Safe to call while readers and writers are active in WAL mode without table locks.
+        """
+        import sqlite3
+        src_path = Path(self.db_path)
+        if not src_path.exists():
+            raise FileNotFoundError(f"Source database does not exist: {src_path}")
+
+        if dest_path is None:
+            now_str = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+            backup_dir = src_path.parent / "backups"
+            backup_dir.mkdir(parents=True, exist_ok=True)
+            target = backup_dir / f"harvey_backup_{now_str}.db"
+        else:
+            target = Path(dest_path)
+            target.parent.mkdir(parents=True, exist_ok=True)
+
+        src_conn = sqlite3.connect(str(src_path))
+        dest_conn = sqlite3.connect(str(target))
+        try:
+            src_conn.backup(dest_conn)
+        finally:
+            dest_conn.close()
+            src_conn.close()
+        return target
+
+    async def verify_integrity(self) -> dict[str, Any]:
+        """Verify SQLite database integrity, check schema version, and run passive WAL checkpoint."""
+        async with self._connect() as db:
+            async with db.execute("PRAGMA quick_check") as cursor:
+                check_rows = await cursor.fetchall()
+            integrity_ok = len(check_rows) == 1 and check_rows[0][0] == "ok"
+
+            async with db.execute("PRAGMA user_version") as cursor:
+                (version,) = await cursor.fetchone()
+
+            async with db.execute("PRAGMA wal_checkpoint(PASSIVE)") as cursor:
+                checkpoint_info = await cursor.fetchone()
+
+            return {
+                "ok": integrity_ok,
+                "quick_check": [r[0] for r in check_rows],
+                "user_version": version,
+                "wal_checkpoint": list(checkpoint_info) if checkpoint_info else [],
+                "db_path": str(self.db_path),
+            }
 
     # ── Companies ──
 
@@ -753,6 +963,10 @@ class StateManager:
         d["phone_verified"] = bool(d.get("phone_verified", 0))
         d["email_status"] = d.get("email_status") or ""
         d["timezone"] = d.get("timezone") or ""
+        d["pipeline_stage"] = d.get("pipeline_stage") or "New"
+        d["notes"] = d.get("notes") or ""
+        d["next_action"] = d.get("next_action") or ""
+        d["follow_up_date"] = d.get("follow_up_date") or ""
         return Prospect(**d)
 
     async def add_prospect(self, prospect: Prospect) -> str:
@@ -769,10 +983,11 @@ class StateManager:
                     email_status, phone, phone_verified, linkedin_url, title,
                     seniority, department, source, source_url, status, score,
                     personalization_notes, company, industry, company_size,
+                    pipeline_stage, notes, next_action, follow_up_date,
                     created_at, updated_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
-                    prospect.id, prospect.company_id,
+                    prospect.id, (prospect.company_id if prospect.company_id else None),
                     prospect.first_name, prospect.last_name,
                     prospect.email, int(prospect.email_verified),
                     prospect.email_status,
@@ -783,6 +998,10 @@ class StateManager:
                     prospect.status, prospect.score,
                     prospect.personalization_notes,
                     prospect.company, prospect.industry, prospect.company_size,
+                    prospect.pipeline_stage or "New",
+                    prospect.notes or "",
+                    prospect.next_action or "",
+                    prospect.follow_up_date or "",
                     prospect.created_at.isoformat(),
                     prospect.updated_at.isoformat(),
                 ),
@@ -2288,6 +2507,20 @@ class StateManager:
             await db.commit()
         return campaign.id
 
+    async def get_campaign(self, campaign_id: str) -> Campaign | None:
+        async with self._connect() as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(
+                "SELECT * FROM campaigns WHERE id = ?", (campaign_id,)
+            ) as cursor:
+                row = await cursor.fetchone()
+                if not row:
+                    return None
+                d = dict(row)
+                d["sequence"] = Campaign.sequence_from_json(d.pop("sequence_json", None))
+                d["prospect_ids"] = json.loads(d.pop("prospect_ids_json", None) or "[]")
+                return Campaign(**d)
+
     async def get_campaigns_by_status(self, status: str) -> list[Campaign]:
         async with self._connect() as db:
             db.row_factory = aiosqlite.Row
@@ -2324,15 +2557,16 @@ class StateManager:
         if not convo.id:
             convo.id = _new_id()
         async with self._connect() as db:
+            priority = getattr(convo, "priority", "medium") or "medium"
             await db.execute(
                 """INSERT INTO conversations
                    (id, prospect_id, campaign_id, channel, thread_json,
-                    intent, stage, status, created_at, updated_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    intent, priority, stage, status, created_at, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
-                    convo.id, convo.prospect_id, convo.campaign_id,
+                    convo.id, (convo.prospect_id if convo.prospect_id else None), convo.campaign_id,
                     convo.channel, convo.thread_json(), convo.intent,
-                    convo.stage, convo.status, convo.created_at.isoformat(),
+                    priority, convo.stage, convo.status, convo.created_at.isoformat(),
                     convo.updated_at.isoformat(),
                 ),
             )
@@ -2391,6 +2625,30 @@ class StateManager:
             )
             await db.commit()
 
+    async def get_actions_for_campaign(self, campaign_id: str) -> list[dict]:
+        """Chronological audit actions for a specific campaign, newest first."""
+        async with self._connect() as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(
+                """SELECT id, action_type, agent, details_json, created_at
+                   FROM actions
+                   WHERE details_json LIKE '%' || ? || '%'
+                   ORDER BY created_at DESC, rowid DESC""",
+                (campaign_id,),
+            ) as cursor:
+                rows = await cursor.fetchall()
+            out = []
+            for r in rows:
+                d = dict(r)
+                try:
+                    details = json.loads(d.get("details_json") or "{}")
+                except Exception:
+                    details = {}
+                if details.get("campaign_id") == campaign_id:
+                    d["details"] = details
+                    out.append(d)
+            return out
+
     # ── Analytics ──
 
     async def get_campaign_stats(self) -> list[dict]:
@@ -2446,17 +2704,27 @@ class StateManager:
 
     async def get_usage_today(self, provider: str = "claude") -> int:
         """Brain calls made today on one provider's subscription."""
-        column = _USAGE_LOG_COLUMN[provider]
+        column = _USAGE_LOG_COLUMN.get(provider)
         today = date.today().isoformat()
         async with self._connect() as db:
-            async with db.execute(
-                f"SELECT {column} FROM usage_log WHERE date = ?", (today,)
-            ) as cursor:
-                row = await cursor.fetchone()
-                return (row[0] or 0) if row else 0
+            if column:
+                async with db.execute(
+                    f"SELECT {column} FROM usage_log WHERE date = ?", (today,)
+                ) as cursor:
+                    row = await cursor.fetchone()
+                    return (row[0] or 0) if row else 0
+            else:
+                async with db.execute(
+                    "SELECT COUNT(*) FROM usage_events WHERE provider = ? AND date(created_at) = ?",
+                    (provider, today),
+                ) as cursor:
+                    row = await cursor.fetchone()
+                    return (row[0] or 0) if row else 0
 
     async def increment_usage(self, provider: str = "claude"):
-        column = _USAGE_LOG_COLUMN[provider]
+        column = _USAGE_LOG_COLUMN.get(provider)
+        if not column:
+            return
         today = date.today().isoformat()
         async with self._connect() as db:
             await db.execute(
@@ -2647,3 +2915,1192 @@ class StateManager:
             "unprofiled": await self.count_companies_needing_profile(),
         }
 
+    # ── Business Profiles & Lead Discovery ──
+
+    async def get_business_profiles(self) -> list[dict]:
+        await self.seed_default_business_profiles()
+        async with self._connect() as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(
+                "SELECT * FROM business_profiles ORDER BY is_default DESC, created_at ASC"
+            ) as cursor:
+                rows = await cursor.fetchall()
+                out = []
+                seen_names = set()
+                for r in rows:
+                    d = dict(r)
+                    norm_name = (d.get("name") or "").strip().lower()
+                    if norm_name and norm_name in seen_names:
+                        continue
+                    if norm_name:
+                        seen_names.add(norm_name)
+                    for k in ("icp_titles", "target_criteria"):
+                        raw = d.get(k)
+                        try:
+                            d[k] = json.loads(raw) if raw else ([] if k == "icp_titles" else {})
+                        except (json.JSONDecodeError, TypeError):
+                            d[k] = [] if k == "icp_titles" else {}
+                    out.append(d)
+                return out
+
+    async def get_business_profile(self, profile_id: str) -> dict | None:
+        async with self._connect() as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(
+                "SELECT * FROM business_profiles WHERE id = ?", (profile_id,)
+            ) as cursor:
+                row = await cursor.fetchone()
+                if not row:
+                    return None
+                d = dict(row)
+                for k in ("icp_titles", "target_criteria"):
+                    raw = d.get(k)
+                    try:
+                        d[k] = json.loads(raw) if raw else ([] if k == "icp_titles" else {})
+                    except (json.JSONDecodeError, TypeError):
+                        d[k] = [] if k == "icp_titles" else {}
+                return d
+
+    async def create_business_profile(self, profile_data: dict) -> dict:
+        name = (profile_data.get("name") or "New Business Profile").strip()
+        industry = profile_data.get("industry") or ""
+        geography = profile_data.get("geography") or ""
+        geography_scope = profile_data.get("geography_scope") or "worldwide"
+        company_size = profile_data.get("company_size") or ""
+        titles_val = profile_data.get("icp_titles") or []
+        icp_titles = json.dumps(titles_val if isinstance(titles_val, list) else [titles_val])
+        product_name = profile_data.get("product_name") or ""
+        product_description = profile_data.get("product_description") or ""
+        crit_val = profile_data.get("target_criteria") or {}
+        target_criteria = json.dumps(crit_val if isinstance(crit_val, dict) else {})
+        is_default = 1 if profile_data.get("is_default") else 0
+
+        async with self._connect() as db:
+            pid = profile_data.get("id")
+            if not pid:
+                # Check for existing profile with the same name to prevent duplicate creation
+                async with db.execute(
+                    "SELECT id, is_default FROM business_profiles WHERE LOWER(TRIM(name)) = LOWER(TRIM(?)) LIMIT 1",
+                    (name,),
+                ) as cursor:
+                    existing = await cursor.fetchone()
+                    if existing:
+                        pid = existing[0]
+                        if existing[1] == 1:
+                            is_default = 1
+                    else:
+                        pid = _new_id()
+
+            await db.execute(
+                """INSERT INTO business_profiles
+                   (id, name, industry, geography, geography_scope, company_size, icp_titles,
+                    product_name, product_description, target_criteria, is_default)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                   ON CONFLICT(id) DO UPDATE SET
+                    name=excluded.name,
+                    industry=excluded.industry,
+                    geography=excluded.geography,
+                    geography_scope=excluded.geography_scope,
+                    company_size=excluded.company_size,
+                    icp_titles=excluded.icp_titles,
+                    product_name=excluded.product_name,
+                    product_description=excluded.product_description,
+                    target_criteria=excluded.target_criteria,
+                    is_default=excluded.is_default,
+                    updated_at=CURRENT_TIMESTAMP""",
+                (pid, name, industry, geography, geography_scope, company_size, icp_titles,
+                 product_name, product_description, target_criteria, is_default)
+            )
+            await db.commit()
+        res = await self.get_business_profile(pid)
+        return res or profile_data
+
+    async def seed_default_business_profiles(self, config=None):
+        """Seed initial multi-industry business profiles if missing."""
+        # Profile 1: Dental Outreach (India)
+        p1 = {
+            "id": "prof_dental_in",
+            "name": "Dental Clinics & Practices (India)",
+            "industry": "Healthcare / Dental",
+            "geography": "Indore, Madhya Pradesh, India",
+            "geography_scope": "cities",
+            "company_size": "10-200 employees",
+            "icp_titles": ["Owner", "Dentist", "Dental Surgeon", "Founder", "Director", "Practice Manager"],
+            "product_name": "Harvey AI",
+            "product_description": "Autonomous B2B outreach assistant that drafts personalized introductory correspondence grounded in verified research",
+            "target_criteria": {"min_score": 60, "require_decision_maker": True},
+            "is_default": 1,
+        }
+        # Profile 2: B2B SaaS & Growth Tech
+        p2 = {
+            "id": "prof_saas_global",
+            "name": "B2B SaaS & High-Growth Tech",
+            "industry": "Software / B2B SaaS",
+            "geography": "North America & Remote",
+            "company_size": "20-500 employees",
+            "icp_titles": ["VP Sales", "Head of Growth", "Founder", "CEO", "Revenue Operations"],
+            "product_name": "Harvey AI",
+            "product_description": "AI sales agent that identifies prospects, enriches company signals, and drafts outbound sequences",
+            "target_criteria": {"min_score": 65},
+            "is_default": 0,
+        }
+        # Profile 3: Specialized Healthcare Clinics
+        p3 = {
+            "id": "prof_specialty_clinics",
+            "name": "Private Healthcare & Specialty Clinics",
+            "industry": "Specialized Healthcare Services",
+            "geography": "Tier 1 & Tier 2 Metro Clinics",
+            "company_size": "5-50 employees",
+            "icp_titles": ["Clinic Director", "Practice Owner", "Medical Superintendent", "Partner"],
+            "product_name": "Harvey AI",
+            "product_description": "Automated outreach and consultation coordination software",
+            "target_criteria": {"min_score": 60},
+            "is_default": 0,
+        }
+        # Profile 4: Legal Services & Law Firms
+        p4 = {
+            "id": "prof_legal_services",
+            "name": "Corporate Law & Legal Advisory",
+            "industry": "Legal Services / Law Firms",
+            "geography": "United States & United Kingdom",
+            "company_size": "15-250 employees",
+            "icp_titles": ["Managing Partner", "Partner", "Practice Group Leader", "Legal Director", "General Counsel"],
+            "product_name": "Harvey AI",
+            "product_description": "Intelligent client intake and consultation coordination agent with local confidentiality and operator review gates",
+            "target_criteria": {"min_score": 60, "require_decision_maker": True},
+            "is_default": 0,
+        }
+        # Profile 5: Accounting & Financial Advisory
+        p5 = {
+            "id": "prof_accounting_finance",
+            "name": "Accounting, Tax & Advisory Services",
+            "industry": "Accounting & Financial Services",
+            "geography": "National & Regional Metro Areas",
+            "company_size": "10-150 employees",
+            "icp_titles": ["Managing Partner", "CPA", "Audit Partner", "Tax Director", "Founder", "Practice Leader"],
+            "product_name": "Harvey AI",
+            "product_description": "Autonomous advisory correspondence assistant that automates client onboarding and reduces seasonal follow-up overhead",
+            "target_criteria": {"min_score": 60},
+            "is_default": 0,
+        }
+        # Profile 6: Commercial HVAC & Facility Services
+        p6 = {
+            "id": "prof_home_services",
+            "name": "Commercial HVAC & Facility Services",
+            "industry": "Commercial & Home Services",
+            "geography": "Regional Commercial Service Areas",
+            "company_size": "20-200 employees",
+            "icp_titles": ["Owner", "VP Operations", "Commercial Service Director", "General Manager", "Estimating Director"],
+            "product_name": "Harvey AI",
+            "product_description": "Fast quote follow-up and commercial service agreement outreach assistant for facility and contracting teams",
+            "target_criteria": {"min_score": 60},
+            "is_default": 0,
+        }
+        for p in (p1, p2, p3, p4, p5, p6):
+            existing = await self.get_business_profile(p["id"])
+            if not existing:
+                await self.create_business_profile(p)
+
+    async def delete_business_profile(self, profile_id: str) -> bool:
+        """Delete a business profile by ID. Prevents deleting the default profile."""
+        async with self._connect() as db:
+            async with db.execute("SELECT is_default FROM business_profiles WHERE id = ?", (profile_id,)) as cursor:
+                row = await cursor.fetchone()
+                if not row:
+                    return False
+                if row[0] == 1:
+                    raise ValueError("Cannot delete the default business profile.")
+            await db.execute("DELETE FROM business_profiles WHERE id = ?", (profile_id,))
+            await db.commit()
+            return True
+
+    async def save_discovered_lead(self, lead_data: dict) -> str:
+        lid = lead_data.get("id")
+        profile_id = lead_data.get("profile_id") or ""
+        company_name = lead_data.get("company_name") or ""
+        domain = _norm(lead_data.get("domain") or "")
+        website = lead_data.get("website") or ""
+        industry = lead_data.get("industry") or ""
+        location = lead_data.get("location") or ""
+        city = lead_data.get("city") or ""
+        state_region = lead_data.get("state_region") or ""
+        country = lead_data.get("country") or ""
+        if location and (not city or not country):
+            c, s, co = parse_location_components(location)
+            city = city or c
+            state_region = state_region or s
+            country = country or co
+        company_size = lead_data.get("company_size") or ""
+        description = lead_data.get("description") or ""
+        decision_maker_json = json.dumps(lead_data.get("decision_maker") or {})
+        potential_needs_json = json.dumps(lead_data.get("potential_needs") or [])
+        research_sources_json = json.dumps(lead_data.get("research_sources") or lead_data.get("sources") or [])
+        missing_fields_json = json.dumps(lead_data.get("missing_fields") or [])
+        score = int(lead_data.get("score") or 0)
+        tier = lead_data.get("tier") or "unscored"
+        reasons_json = json.dumps(lead_data.get("reasons") or [])
+        confidence = float(lead_data.get("confidence") or 0.0)
+        is_qualified = 1 if lead_data.get("is_qualified") else 0
+        is_sample = 1 if lead_data.get("is_sample", True) else 0
+        bant_breakdown_json = json.dumps(lead_data.get("bant_breakdown") or {})
+
+        async with self._connect() as db:
+            # Domain deduplication: reuse existing lead record if domain matches
+            if not lid and domain:
+                query = "SELECT id FROM discovered_leads WHERE LOWER(domain) = ?"
+                params: tuple = (domain,)
+                if profile_id:
+                    query += " AND profile_id = ?"
+                    params = (domain, profile_id)
+                async with db.execute(query, params) as cursor:
+                    row = await cursor.fetchone()
+                    if row:
+                        lid = row[0]
+
+            if not lid:
+                lid = _new_id()
+
+            await db.execute(
+                """INSERT INTO discovered_leads
+                   (id, profile_id, company_name, domain, website, industry, location,
+                    city, state_region, country,
+                    company_size, description, decision_maker_json, potential_needs_json,
+                    research_sources_json, missing_fields_json, score, tier,
+                    reasons_json, confidence, is_qualified, is_sample, bant_breakdown_json)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                   ON CONFLICT(id) DO UPDATE SET
+                    company_name=excluded.company_name,
+                    domain=excluded.domain,
+                    website=excluded.website,
+                    industry=excluded.industry,
+                    location=excluded.location,
+                    city=excluded.city,
+                    state_region=excluded.state_region,
+                    country=excluded.country,
+                    company_size=excluded.company_size,
+                    description=excluded.description,
+                    decision_maker_json=excluded.decision_maker_json,
+                    potential_needs_json=excluded.potential_needs_json,
+                    research_sources_json=excluded.research_sources_json,
+                    missing_fields_json=excluded.missing_fields_json,
+                    score=excluded.score,
+                    tier=excluded.tier,
+                    reasons_json=excluded.reasons_json,
+                    confidence=excluded.confidence,
+                    is_qualified=excluded.is_qualified,
+                    bant_breakdown_json=excluded.bant_breakdown_json,
+                    updated_at=CURRENT_TIMESTAMP""",
+                (lid, profile_id, company_name, domain, website, industry, location,
+                 city, state_region, country,
+                 company_size, description, decision_maker_json, potential_needs_json,
+                 research_sources_json, missing_fields_json, score, tier,
+                 reasons_json, confidence, is_qualified, is_sample, bant_breakdown_json)
+            )
+            await db.commit()
+        return lid
+
+    async def get_discovered_leads(self, profile_id: str | None = None) -> list[dict]:
+        async with self._connect() as db:
+            db.row_factory = aiosqlite.Row
+            query = "SELECT * FROM discovered_leads"
+            params: tuple = ()
+            if profile_id:
+                query += " WHERE profile_id = ?"
+                params = (profile_id,)
+            query += " ORDER BY score DESC, created_at DESC"
+            async with db.execute(query, params) as cursor:
+                rows = await cursor.fetchall()
+                out = []
+                seen_domains = set()
+                for r in rows:
+                    d = dict(r)
+                    dom = _norm(d.get("domain") or "")
+                    if dom:
+                        if dom in seen_domains:
+                            continue
+                        seen_domains.add(dom)
+                    for k in ("decision_maker_json", "potential_needs_json", "research_sources_json",
+                              "missing_fields_json", "reasons_json", "bant_breakdown_json"):
+                        raw = d.get(k)
+                        clean_key = k[:-5] if k.endswith("_json") else k
+                        try:
+                            d[clean_key] = json.loads(raw) if raw else ([] if k not in ("decision_maker_json", "bant_breakdown_json") else {})
+                        except (json.JSONDecodeError, TypeError):
+                            d[clean_key] = [] if k not in ("decision_maker_json", "bant_breakdown_json") else {}
+                    out.append(d)
+                return out
+
+    async def get_discovered_lead(self, lead_id: str) -> dict | None:
+        async with self._connect() as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute("SELECT * FROM discovered_leads WHERE id = ?", (lead_id,)) as cursor:
+                row = await cursor.fetchone()
+                if not row:
+                    return None
+                d = dict(row)
+                for k in ("decision_maker_json", "potential_needs_json", "research_sources_json",
+                          "missing_fields_json", "reasons_json", "bant_breakdown_json"):
+                    raw = d.get(k)
+                    clean_key = k[:-5] if k.endswith("_json") else k
+                    try:
+                        d[clean_key] = json.loads(raw) if raw else ([] if k not in ("decision_maker_json", "bant_breakdown_json") else {})
+                    except (json.JSONDecodeError, TypeError):
+                        d[clean_key] = [] if k not in ("decision_maker_json", "bant_breakdown_json") else {}
+                return d
+
+    async def add_discovered_lead_to_pipeline(self, lead_id: str) -> dict:
+        lead = await self.get_discovered_lead(lead_id)
+        if not lead:
+            raise ValueError(f"Discovered lead not found: {lead_id}")
+
+        domain = _norm(lead.get("domain") or "")
+        dm = lead.get("decision_maker") or {}
+        email = _norm(dm.get("email") or "")
+        company_name = lead.get("company_name") or "Unknown Company"
+
+        # Check existing company
+        existing_company = await self.get_company_by_domain(domain) if domain else None
+        if not existing_company:
+            # Check by name
+            async with self._connect() as db:
+                db.row_factory = aiosqlite.Row
+                async with db.execute(
+                    "SELECT * FROM companies WHERE LOWER(name) = LOWER(?)", (company_name,)
+                ) as c:
+                    r = await c.fetchone()
+                    if r:
+                        existing_company = self._company_from_row(r)
+
+        created_company = False
+        if existing_company:
+            company_id = existing_company.id
+        else:
+            comp = Company(
+                name=company_name,
+                domain=domain,
+                website=lead.get("website") or (f"https://{domain}" if domain else ""),
+                description=lead.get("description") or "",
+                industry=lead.get("industry") or "",
+                company_size=lead.get("company_size") or "",
+                location=lead.get("location") or "",
+                source=f"discovery:{lead.get('profile_id', 'sample')}",
+            )
+            company_id = await self.add_company(comp)
+            created_company = True
+
+        # Check existing prospect
+        existing_prospect = await self.get_prospect_by_email(email) if email else None
+        created_prospect = False
+        prospect_id = ""
+
+        if existing_prospect:
+            prospect_id = existing_prospect.id
+        elif dm.get("name") or email:
+            full_name = dm.get("name") or ""
+            parts = full_name.split(None, 1)
+            first_name = parts[0] if parts else ""
+            last_name = parts[1] if len(parts) > 1 else ""
+
+            prosp = Prospect(
+                company_id=company_id,
+                first_name=first_name,
+                last_name=last_name,
+                email=email,
+                email_status=dm.get("email_status") or "verified",
+                email_verified=bool(dm.get("email_status") == "verified"),
+                title=dm.get("title") or "Decision Maker",
+                linkedin_url=dm.get("linkedin_url") or "",
+                company=company_name,
+                industry=lead.get("industry") or "",
+                company_size=lead.get("company_size") or "",
+                source=f"discovery:{lead.get('profile_id', 'sample')}",
+                status="new",
+                score=lead.get("score") or 0,
+            )
+            prospect_id = await self.add_prospect(prosp)
+            created_prospect = True
+
+        # Mark lead added to CRM
+        async with self._connect() as db:
+            await db.execute("UPDATE discovered_leads SET added_to_crm = 1 WHERE id = ?", (lead_id,))
+            await db.commit()
+
+        await self.log_action("lead_added_to_crm", lead_id, {
+            "company_id": company_id,
+            "prospect_id": prospect_id,
+            "created_company": created_company,
+            "created_prospect": created_prospect,
+        })
+
+        return {
+            "lead_id": lead_id,
+            "company_id": company_id,
+            "prospect_id": prospect_id,
+            "created_company": created_company,
+            "created_prospect": created_prospect,
+            "already_existed": not (created_company or created_prospect),
+        }
+
+
+
+    # ── Lead Research & Company Enrichment (v17) ──
+
+    @staticmethod
+    def _parse_research_row(row: Any) -> dict:
+        d = dict(row)
+        json_fields = (
+            ("products_services_json", "products_services", []),
+            ("potential_needs_json", "potential_needs", []),
+            ("verified_facts_json", "verified_facts", []),
+            ("inferred_observations_json", "inferred_observations", []),
+            ("unknown_fields_json", "unknown_fields", []),
+            ("sources_json", "sources", []),
+            ("fit_reasons_json", "fit_reasons", []),
+            ("potential_use_cases_json", "potential_use_cases", []),
+        )
+        for col, clean_k, default in json_fields:
+            raw = d.get(col)
+            try:
+                d[clean_k] = json.loads(raw) if raw else default
+            except (json.JSONDecodeError, TypeError):
+                d[clean_k] = default
+        return d
+
+    async def get_lead_research(self, prospect_id: str) -> dict | None:
+        """Get latest research & enrichment record for a prospect."""
+        async with self._connect() as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(
+                "SELECT * FROM lead_research WHERE prospect_id = ? ORDER BY researched_at DESC LIMIT 1",
+                (prospect_id,),
+            ) as cursor:
+                row = await cursor.fetchone()
+                return self._parse_research_row(row) if row else None
+
+    async def get_lead_research_by_domain(self, domain: str) -> dict | None:
+        """Get latest research & enrichment record for a domain (for deduplication / freshness)."""
+        domain_norm = (domain or "").strip().lower()
+        if not domain_norm:
+            return None
+        async with self._connect() as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(
+                "SELECT * FROM lead_research WHERE domain = ? ORDER BY researched_at DESC LIMIT 1",
+                (domain_norm,),
+            ) as cursor:
+                row = await cursor.fetchone()
+                return self._parse_research_row(row) if row else None
+
+    async def save_lead_research(self, record: dict) -> str:
+        """Insert or update a lead research & enrichment record."""
+        import uuid
+        rid = record.get("id") or f"res_{uuid.uuid4().hex[:12]}"
+        now = datetime.now(timezone.utc).replace(tzinfo=None).isoformat()
+
+        products_json = json.dumps(record.get("products_services") or [])
+        needs_json = json.dumps(record.get("potential_needs") or [])
+        facts_json = json.dumps(record.get("verified_facts") or [])
+        inferred_json = json.dumps(record.get("inferred_observations") or [])
+        unknown_json = json.dumps(record.get("unknown_fields") or [])
+        sources_json = json.dumps(record.get("sources") or [])
+        fit_reasons_json = json.dumps(record.get("fit_reasons") or [])
+        use_cases_json = json.dumps(record.get("potential_use_cases") or [])
+
+        async with self._connect() as db:
+            await db.execute(
+                """INSERT INTO lead_research (
+                    id, prospect_id, company_id, company_name, domain, website,
+                    industry, business_category, company_overview, products_services_json,
+                    target_customers, potential_needs_json, verified_facts_json,
+                    inferred_observations_json, unknown_fields_json, sources_json,
+                    fit_score, fit_tier, fit_reasons_json, potential_use_cases_json,
+                    recommended_action, confidence, is_sample, researched_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET
+                    company_name = excluded.company_name,
+                    domain = excluded.domain,
+                    website = excluded.website,
+                    industry = excluded.industry,
+                    business_category = excluded.business_category,
+                    company_overview = excluded.company_overview,
+                    products_services_json = excluded.products_services_json,
+                    target_customers = excluded.target_customers,
+                    potential_needs_json = excluded.potential_needs_json,
+                    verified_facts_json = excluded.verified_facts_json,
+                    inferred_observations_json = excluded.inferred_observations_json,
+                    unknown_fields_json = excluded.unknown_fields_json,
+                    sources_json = excluded.sources_json,
+                    fit_score = excluded.fit_score,
+                    fit_tier = excluded.fit_tier,
+                    fit_reasons_json = excluded.fit_reasons_json,
+                    potential_use_cases_json = excluded.potential_use_cases_json,
+                    recommended_action = excluded.recommended_action,
+                    confidence = excluded.confidence,
+                    is_sample = excluded.is_sample,
+                    researched_at = excluded.researched_at,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    rid,
+                    record.get("prospect_id", ""),
+                    record.get("company_id", ""),
+                    record.get("company_name", "Unknown Company"),
+                    (record.get("domain", "") or "").strip().lower(),
+                    record.get("website", ""),
+                    record.get("industry", "Unknown"),
+                    record.get("business_category", "Unknown"),
+                    record.get("company_overview", ""),
+                    products_json,
+                    record.get("target_customers", "Unknown"),
+                    needs_json,
+                    facts_json,
+                    inferred_json,
+                    unknown_json,
+                    sources_json,
+                    int(record.get("fit_score", 0)),
+                    record.get("fit_tier", "Unscored"),
+                    fit_reasons_json,
+                    use_cases_json,
+                    record.get("recommended_action", ""),
+                    float(record.get("confidence", 0.0)),
+                    int(bool(record.get("is_sample", False))),
+                    record.get("researched_at", now),
+                    now,
+                ),
+            )
+            await db.commit()
+        return rid
+
+    async def get_all_lead_research(self, limit: int = 50) -> list[dict]:
+        """Get recent research & enrichment records."""
+        async with self._connect() as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(
+                "SELECT * FROM lead_research ORDER BY researched_at DESC LIMIT ?",
+                (limit,),
+            ) as cursor:
+                rows = await cursor.fetchall()
+                return [self._parse_research_row(r) for r in rows]
+
+
+    # ── Lead Discovery Review & CRM Pipeline Automation (v18) ──
+
+    async def update_prospect_pipeline(
+        self,
+        prospect_id: str,
+        stage: str | None = None,
+        notes: str | None = None,
+        next_action: str | None = None,
+        follow_up_date: str | None = None,
+    ) -> dict:
+        """Update CRM pipeline stage, notes, next action, and follow-up date."""
+        if stage and stage not in CRM_PIPELINE_STAGES:
+            raise ValueError(f"Invalid pipeline stage '{stage}'. Must be one of: {CRM_PIPELINE_STAGES}")
+
+        now = _utcnow().isoformat()
+        fields = []
+        values = []
+
+        if stage is not None:
+            fields.append("pipeline_stage = ?")
+            values.append(stage)
+            # Sync status if applicable
+            if stage == "Contacted":
+                fields.append("status = CASE WHEN status = 'new' THEN 'contacted' ELSE status END")
+            elif stage == "Interested":
+                fields.append("status = 'interested'")
+            elif stage == "Meeting":
+                fields.append("status = 'meeting'")
+            elif stage == "Lost":
+                fields.append("status = 'closed'")
+
+        if notes is not None:
+            fields.append("notes = ?")
+            values.append(notes)
+        if next_action is not None:
+            fields.append("next_action = ?")
+            values.append(next_action)
+        if follow_up_date is not None:
+            fields.append("follow_up_date = ?")
+            values.append(follow_up_date)
+
+        fields.append("updated_at = ?")
+        values.append(now)
+        values.append(prospect_id)
+
+        sql = f"UPDATE prospects SET {', '.join(fields)} WHERE id = ?"
+
+        async with self._connect() as db:
+            await db.execute(sql, tuple(values))
+            await db.commit()
+
+        # Retrieve updated prospect
+        prospect = await self.get_prospect(prospect_id)
+        if not prospect:
+            raise ValueError(f"Prospect {prospect_id} not found")
+
+        await self.log_action("pipeline_stage_changed" if stage else "pipeline_lead_updated", prospect_id, {
+            "prospect_id": prospect_id,
+            "pipeline_stage": prospect.pipeline_stage,
+            "notes": prospect.notes,
+            "next_action": prospect.next_action,
+            "follow_up_date": prospect.follow_up_date,
+        })
+
+        return prospect.model_dump() if hasattr(prospect, "model_dump") else prospect.dict()
+
+    async def get_pipeline_leads(
+        self,
+        stage: str | None = None,
+        search: str | None = None,
+        sort_by: str = "score",
+    ) -> dict:
+        """Return leads in CRM pipeline with company details, stage breakdown, and search."""
+        async with self._connect() as db:
+            db.row_factory = aiosqlite.Row
+            sql = """
+                SELECT p.*,
+                       c.name AS company_name,
+                       c.domain AS company_domain,
+                       c.website AS company_website,
+                       c.location AS company_location,
+                       c.industry AS company_industry,
+                       c.company_size AS company_size_val
+                FROM prospects p
+                LEFT JOIN companies c ON c.id = p.company_id
+                ORDER BY p.score DESC, p.created_at DESC
+            """
+            async with db.execute(sql) as cursor:
+                rows = await cursor.fetchall()
+
+        all_leads = []
+        stage_counts = {s: 0 for s in CRM_PIPELINE_STAGES}
+
+        for r in rows:
+            d = dict(r)
+            pstg = d.get("pipeline_stage") or "New"
+            if pstg not in stage_counts:
+                pstg = "New"
+            d["pipeline_stage"] = pstg
+            stage_counts[pstg] += 1
+            all_leads.append(d)
+
+        filtered = all_leads
+
+        if stage and stage != "all":
+            filtered = [l for l in filtered if l.get("pipeline_stage") == stage]
+
+        if search and search.strip():
+            q = search.strip().lower()
+            filtered = [
+                l for l in filtered
+                if q in (l.get("first_name", "") + " " + l.get("last_name", "")).lower()
+                or q in (l.get("company_name") or l.get("company") or "").lower()
+                or q in (l.get("email") or "").lower()
+                or q in (l.get("title") or "").lower()
+                or q in (l.get("notes") or "").lower()
+            ]
+
+        if sort_by == "score":
+            filtered.sort(key=lambda x: int(x.get("score") or 0), reverse=True)
+        elif sort_by == "name":
+            filtered.sort(key=lambda x: (x.get("first_name") or "").lower())
+        elif sort_by == "updated_at":
+            filtered.sort(key=lambda x: str(x.get("updated_at") or ""), reverse=True)
+        elif sort_by == "follow_up":
+            filtered.sort(key=lambda x: str(x.get("follow_up_date") or "9999"))
+
+        return {
+            "total": len(filtered),
+            "stages": stage_counts,
+            "leads": filtered,
+        }
+
+    async def check_lead_duplicates(
+        self,
+        domain: str | None = None,
+        email: str | None = None,
+        company_name: str | None = None,
+    ) -> dict:
+        """Check if a company or prospect already exists in CRM."""
+        matches = []
+        is_dup = False
+        reasons = []
+
+        norm_domain = (domain or "").strip().lower()
+        norm_email = (email or "").strip().lower()
+        norm_name = (company_name or "").strip().lower()
+
+        if norm_domain:
+            comp = await self.get_company_by_domain(norm_domain)
+            if comp:
+                is_dup = True
+                matches.append({
+                    "type": "domain",
+                    "entity": "company",
+                    "id": comp.id,
+                    "name": comp.name,
+                    "detail": comp.domain,
+                })
+                reasons.append(f"Company already in CRM (Domain: {comp.domain})")
+
+        if norm_email:
+            prosp = await self.get_prospect_by_email(norm_email)
+            if prosp:
+                is_dup = True
+                matches.append({
+                    "type": "email",
+                    "entity": "prospect",
+                    "id": prosp.id,
+                    "name": prosp.full_name(),
+                    "detail": prosp.email,
+                })
+                reasons.append(f"Prospect already in CRM (Email: {prosp.email})")
+
+        if norm_name and not is_dup:
+            async with self._connect() as db:
+                db.row_factory = aiosqlite.Row
+                async with db.execute(
+                    "SELECT id, name, domain FROM companies WHERE LOWER(name) = ?",
+                    (norm_name,),
+                ) as cursor:
+                    row = await cursor.fetchone()
+                    if row:
+                        is_dup = True
+                        matches.append({
+                            "type": "company_name",
+                            "entity": "company",
+                            "id": row["id"],
+                            "name": row["name"],
+                            "detail": row["domain"],
+                        })
+                        reasons.append(f"Company with same name already in CRM ({row['name']})")
+
+        return {
+            "is_duplicate": is_dup,
+            "matches": matches,
+            "primary_reason": reasons[0] if reasons else "",
+            "all_reasons": reasons,
+        }
+
+    async def update_discovered_lead_status(
+        self,
+        lead_id: str,
+        status: str,
+        rejection_reason: str = "",
+    ) -> bool:
+        """Update candidate review status ('pending', 'approved', 'rejected', 'skipped')."""
+        valid_statuses = {"pending", "approved", "rejected", "skipped"}
+        if status not in valid_statuses:
+            raise ValueError(f"Invalid candidate status '{status}'. Must be one of {valid_statuses}")
+
+        async with self._connect() as db:
+            await db.execute(
+                """UPDATE discovered_leads
+                   SET candidate_status = ?, rejection_reason = ?, updated_at = CURRENT_TIMESTAMP
+                   WHERE id = ?""",
+                (status, rejection_reason, lead_id),
+            )
+            await db.commit()
+        return True
+
+    async def update_lead_qualification_override(
+        self,
+        lead_id: str,
+        is_qualified: bool,
+        reason: str = "",
+    ) -> bool:
+        """Manually override lead qualification status (qualified vs disqualified)."""
+        candidate_status = "approved" if is_qualified else "rejected"
+        tier = "High Fit" if is_qualified else "Low Fit"
+        async with self._connect() as db:
+            await db.execute(
+                """UPDATE discovered_leads
+                   SET is_qualified = ?, candidate_status = ?, tier = ?, rejection_reason = ?, updated_at = CURRENT_TIMESTAMP
+                   WHERE id = ?""",
+                (1 if is_qualified else 0, candidate_status, tier, reason, lead_id),
+            )
+            await db.commit()
+        await self.log_action(
+            action_type="lead_manually_qualified" if is_qualified else "lead_manually_disqualified",
+            agent="user",
+            details={"lead_id": lead_id, "is_qualified": is_qualified, "reason": reason},
+        )
+        return True
+
+    async def import_discovered_lead_to_crm(
+        self,
+        lead_id: str,
+        target_stage: str = "New",
+        notes: str = "",
+    ) -> dict:
+        """Review & import an approved candidate lead into the CRM pipeline."""
+        lead = await self.get_discovered_lead(lead_id)
+        if not lead:
+            raise ValueError(f"Discovered lead not found: {lead_id}")
+
+        domain = _norm(lead.get("domain") or "")
+        dm = lead.get("decision_maker") or {}
+        email = _norm(dm.get("email") or "")
+        company_name = lead.get("company_name") or "Unknown Company"
+
+        # Check existing company
+        existing_company = await self.get_company_by_domain(domain) if domain else None
+        if not existing_company:
+            async with self._connect() as db:
+                db.row_factory = aiosqlite.Row
+                async with db.execute(
+                    "SELECT * FROM companies WHERE LOWER(name) = LOWER(?)", (company_name,)
+                ) as c:
+                    r = await c.fetchone()
+                    if r:
+                        existing_company = self._company_from_row(r)
+
+        created_company = False
+        if existing_company:
+            company_id = existing_company.id
+        else:
+            comp = Company(
+                name=company_name,
+                domain=domain,
+                website=lead.get("website") or (f"https://{domain}" if domain else ""),
+                description=lead.get("description") or "",
+                industry=lead.get("industry") or "",
+                company_size=lead.get("company_size") or "",
+                location=lead.get("location") or "",
+                source=f"discovery:{lead.get('profile_id', 'sample')}",
+            )
+            company_id = await self.add_company(comp)
+            created_company = True
+
+        # Check existing prospect
+        existing_prospect = await self.get_prospect_by_email(email) if email else None
+        created_prospect = False
+        prospect_id = ""
+
+        if existing_prospect:
+            prospect_id = existing_prospect.id
+            # Update stage if provided
+            if target_stage:
+                await self.update_prospect_pipeline(prospect_id, stage=target_stage, notes=notes or None)
+        elif dm.get("name") or email:
+            full_name = dm.get("name") or ""
+            parts = full_name.split(None, 1)
+            first_name = parts[0] if parts else ""
+            last_name = parts[1] if len(parts) > 1 else ""
+
+            prosp = Prospect(
+                company_id=company_id,
+                first_name=first_name,
+                last_name=last_name,
+                email=email,
+                email_status=dm.get("email_status") or "verified",
+                email_verified=bool(dm.get("email_status") == "verified"),
+                title=dm.get("title") or "Decision Maker",
+                linkedin_url=dm.get("linkedin_url") or "",
+                company=company_name,
+                industry=lead.get("industry") or "",
+                company_size=lead.get("company_size") or "",
+                source=f"discovery:{lead.get('profile_id', 'sample')}",
+                status="new",
+                score=int(lead.get("score") or 0),
+                pipeline_stage=target_stage or "New",
+                notes=notes or "",
+            )
+            prospect_id = await self.add_prospect(prosp)
+            created_prospect = True
+
+        # Mark candidate as approved and in CRM
+        async with self._connect() as db:
+            await db.execute(
+                """UPDATE discovered_leads
+                   SET added_to_crm = 1, candidate_status = 'approved', updated_at = CURRENT_TIMESTAMP
+                   WHERE id = ?""",
+                (lead_id,),
+            )
+            await db.commit()
+
+        # Seed research record in lead_research if not present so research is immediately accessible
+        if prospect_id:
+            existing_research = await self.get_lead_research(prospect_id)
+            if not existing_research:
+                research_rec = {
+                    "prospect_id": prospect_id,
+                    "company_id": company_id,
+                    "company_name": company_name,
+                    "domain": domain,
+                    "website": lead.get("website") or (f"https://{domain}" if domain else ""),
+                    "industry": lead.get("industry") or "Unknown",
+                    "business_category": lead.get("business_type") or lead.get("industry") or "Unknown",
+                    "company_overview": lead.get("description") or "",
+                    "products_services": lead.get("target_use_cases") or [],
+                    "target_customers": lead.get("industry") or "Unknown",
+                    "potential_needs": lead.get("potential_needs") or [],
+                    "verified_facts": [
+                        f"Company Name: {company_name}",
+                        f"Domain: {domain}" if domain else "Domain unverified",
+                        f"Contact: {dm.get('name', 'Unknown')} ({dm.get('title', 'Unknown')})",
+                        f"Email: {email}" if email else "Email unverified",
+                    ],
+                    "inferred_observations": lead.get("reasons") or [],
+                    "unknown_fields": lead.get("missing_fields") or [],
+                    "sources": lead.get("sources") or [],
+                    "fit_score": int(lead.get("score") or 0),
+                    "fit_tier": lead.get("tier") or "Unscored",
+                    "fit_reasons": lead.get("reasons") or [],
+                    "potential_use_cases": lead.get("potential_needs") or [],
+                    "recommended_action": f"Begin discovery sequence targeting {dm.get('title', 'Decision Maker')}",
+                    "confidence": float(lead.get("confidence") or 0.8),
+                    "is_sample": bool(lead.get("is_sample", True)),
+                }
+                await self.save_lead_research(research_rec)
+
+        await self.log_action("lead_imported_to_crm", lead_id, {
+            "lead_id": lead_id,
+            "company_id": company_id,
+            "prospect_id": prospect_id,
+            "pipeline_stage": target_stage,
+            "created_company": created_company,
+            "created_prospect": created_prospect,
+        })
+
+        return {
+            "lead_id": lead_id,
+            "company_id": company_id,
+            "prospect_id": prospect_id,
+            "pipeline_stage": target_stage,
+            "created_company": created_company,
+            "created_prospect": created_prospect,
+            "already_existed": not (created_company or created_prospect),
+        }
+
+    async def batch_import_discovered_leads(
+        self,
+        lead_ids: list[str],
+        target_stage: str = "New",
+    ) -> dict:
+        """Batch import multiple approved candidates into CRM."""
+        results = []
+        imported_count = 0
+        for lid in lead_ids:
+            try:
+                res = await self.import_discovered_lead_to_crm(lid, target_stage=target_stage)
+                results.append(res)
+                imported_count += 1
+            except Exception as e:
+                results.append({"lead_id": lid, "error": str(e)})
+
+        return {
+            "success": True,
+            "imported_count": imported_count,
+            "total_requested": len(lead_ids),
+            "results": results,
+        }
+
+    async def batch_update_discovered_leads_status(
+        self,
+        lead_ids: list[str],
+        status: str,
+        reason: str = "",
+    ) -> dict:
+        """Batch update review status for candidate leads."""
+        updated = 0
+        for lid in lead_ids:
+            try:
+                ok = await self.update_discovered_lead_status(lid, status, rejection_reason=reason)
+                if ok:
+                    updated += 1
+            except Exception:
+                pass
+        return {"success": True, "updated_count": updated, "status": status}
+
+
+    # ── AI-Powered Personalized Outreach Drafts (v20) ──
+
+    @staticmethod
+    def _parse_outreach_draft_row(row: Any) -> dict:
+        d = dict(row)
+        for col, clean_k in (
+            ("research_sources_json", "research_sources"),
+            ("verified_facts_json", "verified_facts"),
+            ("missing_fields_json", "missing_fields"),
+        ):
+            raw = d.get(col)
+            try:
+                d[clean_k] = json.loads(raw) if raw else []
+            except (json.JSONDecodeError, TypeError):
+                d[clean_k] = []
+        return d
+
+    async def save_outreach_draft(self, draft: dict[str, Any]) -> str:
+        """Create or update an outreach draft."""
+        draft_id = draft.get("id") or f"draft_{uuid.uuid4().hex[:12]}"
+        now = _utcnow().isoformat()
+
+        sources_json = json.dumps(draft.get("research_sources") or draft.get("sources") or [])
+        facts_json = json.dumps(draft.get("verified_facts") or [])
+        missing_json = json.dumps(draft.get("missing_fields") or [])
+
+        query = """
+        INSERT INTO outreach_drafts (
+            id, lead_id, prospect_id, company_id, profile_id,
+            recipient_name, recipient_email, email_status,
+            company_name, subject, body, value_proposition, call_to_action,
+            personalization_explanation, research_sources_json, verified_facts_json,
+            missing_fields_json, status, outbox_id, generation_method, error_message,
+            created_at, updated_at
+        ) VALUES (
+            ?, ?, ?, ?, ?,
+            ?, ?, ?,
+            ?, ?, ?, ?, ?,
+            ?, ?, ?,
+            ?, ?, ?, ?, ?,
+            ?, ?
+        )
+        ON CONFLICT(id) DO UPDATE SET
+            recipient_name = excluded.recipient_name,
+            recipient_email = excluded.recipient_email,
+            email_status = excluded.email_status,
+            company_name = excluded.company_name,
+            subject = excluded.subject,
+            body = excluded.body,
+            value_proposition = excluded.value_proposition,
+            call_to_action = excluded.call_to_action,
+            personalization_explanation = excluded.personalization_explanation,
+            research_sources_json = excluded.research_sources_json,
+            verified_facts_json = excluded.verified_facts_json,
+            missing_fields_json = excluded.missing_fields_json,
+            status = excluded.status,
+            outbox_id = excluded.outbox_id,
+            generation_method = excluded.generation_method,
+            error_message = excluded.error_message,
+            updated_at = excluded.updated_at
+        """
+
+        async with self._connect() as db:
+            await db.execute(query, (
+                draft_id,
+                draft.get("lead_id") or "",
+                draft.get("prospect_id") or "",
+                draft.get("company_id") or "",
+                draft.get("profile_id") or "",
+                draft.get("recipient_name") or "",
+                draft.get("recipient_email") or "",
+                draft.get("email_status") or "",
+                draft.get("company_name") or "",
+                draft.get("subject") or "",
+                draft.get("body") or "",
+                draft.get("value_proposition") or "",
+                draft.get("call_to_action") or "",
+                draft.get("personalization_explanation") or "",
+                sources_json,
+                facts_json,
+                missing_json,
+                draft.get("status") or "draft",
+                draft.get("outbox_id") or "",
+                draft.get("generation_method") or "ai",
+                draft.get("error_message") or "",
+                draft.get("created_at") or now,
+                now,
+            ))
+            await db.commit()
+
+        await self.log_action("outreach_draft_saved", draft_id, {
+            "lead_id": draft.get("lead_id"),
+            "prospect_id": draft.get("prospect_id"),
+            "status": draft.get("status") or "draft",
+            "subject": draft.get("subject", "")[:60],
+        })
+        return draft_id
+
+    async def get_outreach_draft(self, draft_id: str) -> dict | None:
+        """Fetch a specific outreach draft by ID."""
+        async with self._connect() as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute("SELECT * FROM outreach_drafts WHERE id = ?", (draft_id,)) as cursor:
+                row = await cursor.fetchone()
+                if not row:
+                    return None
+                return self._parse_outreach_draft_row(row)
+
+    async def get_outreach_drafts(
+        self,
+        lead_id: str | None = None,
+        prospect_id: str | None = None,
+        company_id: str | None = None,
+        status: str | None = None,
+    ) -> list[dict]:
+        """Fetch outreach drafts filtered by lead, prospect, company, or status."""
+        clauses = []
+        params = []
+        if lead_id:
+            clauses.append("lead_id = ?")
+            params.append(lead_id)
+        if prospect_id:
+            clauses.append("prospect_id = ?")
+            params.append(prospect_id)
+        if company_id:
+            clauses.append("company_id = ?")
+            params.append(company_id)
+        if status:
+            clauses.append("status = ?")
+            params.append(status)
+
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        query = f"SELECT * FROM outreach_drafts {where} ORDER BY created_at DESC"
+
+        async with self._connect() as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(query, params) as cursor:
+                rows = await cursor.fetchall()
+                return [self._parse_outreach_draft_row(r) for r in rows]
+
+    async def update_outreach_draft(self, draft_id: str, **kwargs) -> bool:
+        """Update specific columns of an outreach draft."""
+        allowed = {
+            "subject", "body", "recipient_name", "recipient_email",
+            "email_status", "value_proposition", "call_to_action",
+            "personalization_explanation", "status", "outbox_id",
+            "error_message",
+        }
+        updates = {k: v for k, v in kwargs.items() if k in allowed}
+        if not updates:
+            return False
+
+        updates["updated_at"] = _utcnow().isoformat()
+        set_clauses = [f"{k} = ?" for k in updates]
+        params = list(updates.values()) + [draft_id]
+
+        async with self._connect() as db:
+            cursor = await db.execute(
+                f"UPDATE outreach_drafts SET {', '.join(set_clauses)} WHERE id = ?",
+                params,
+            )
+            await db.commit()
+            return cursor.rowcount > 0
+
+    async def cancel_outreach_draft(self, draft_id: str, reason: str = "") -> bool:
+        """Cancel an outreach draft and its corresponding pending outbox item."""
+        draft = await self.get_outreach_draft(draft_id)
+        if not draft:
+            return False
+
+        outbox_id = draft.get("outbox_id")
+        async with self._connect() as db:
+            await db.execute(
+                "UPDATE outreach_drafts SET status = 'cancelled', updated_at = ? WHERE id = ?",
+                (_utcnow().isoformat(), draft_id),
+            )
+            if outbox_id:
+                # Cancel pending outbox item safely without touching pilot drafts
+                await db.execute(
+                    "UPDATE outbox SET status = 'cancelled', error = ? WHERE id = ? AND status = 'pending_review'",
+                    (reason or "Draft cancelled by operator", outbox_id),
+                )
+            await db.commit()
+
+        await self.log_action("outreach_draft_cancelled", draft_id, {
+            "reason": reason,
+            "outbox_id": outbox_id,
+        })
+        return True

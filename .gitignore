@@ -27,6 +27,7 @@ skills/email_rules.md
 # Local agent tooling
 .agents/
 AGENTS.md
+scratch/
 
 # IDE
 .vscode/

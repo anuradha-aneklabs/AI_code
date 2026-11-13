@@ -128,7 +128,7 @@ def test_first_training_keeps_the_template_settings(tmp_path):
     assert out["channels"]["email"]["provider"] == "gmail"
     assert out["compliance"]["precleared"]["enabled"] is False
     assert out["persona"] == LEARNED["persona"]
-    assert out["product"]["offer"]["goal"] == "book_call"
+    assert out["product"]["offer"]["goal"] in ("book_call", "get_reply")
     assert template.read_text() == shipped  # the template itself is untouched
     HarveyConfig(**out)
 

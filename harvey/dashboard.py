@@ -11,6 +11,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import time
 import uuid
 from datetime import date, datetime, timezone
 from pathlib import Path
@@ -18,7 +19,7 @@ from pathlib import Path
 import aiosqlite
 import yaml
 from dotenv import load_dotenv
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, UploadFile, File
 from fastapi.responses import (
     HTMLResponse, JSONResponse, PlainTextResponse, Response,
 )
@@ -48,11 +49,39 @@ def _resolve_config_file() -> Path:
     except ConfigFileNotFoundError:
         return CONFIG_FILE
 
+from contextlib import asynccontextmanager
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Application lifespan: verify database on startup and clean up subprocesses on shutdown."""
+    try:
+        state = _state()
+        await state.init_db()
+    except Exception as e:
+        logger.error(f"Dashboard startup DB initialization error: {e}")
+    yield
+    global _harvey_process
+    if _harvey_process and _harvey_process.poll() is None:
+        try:
+            _harvey_process.terminate()
+        except Exception:
+            pass
+
+
 # No /docs, /redoc or /openapi.json: the API is for this UI only, and every
 # route except the static shell needs the token (see dashboard_auth).
-app = FastAPI(title="Harvey Dashboard", docs_url=None, redoc_url=None, openapi_url=None)
+app = FastAPI(title="Harvey Dashboard", docs_url=None, redoc_url=None, openapi_url=None, lifespan=lifespan)
 token_store = auth.TokenStore(TOKEN_FILE)
 app.add_middleware(auth.DashboardGuard, store=token_store)
+
+
+@app.exception_handler(json.JSONDecodeError)
+async def json_decode_error_handler(request: Request, exc: json.JSONDecodeError):
+    return JSONResponse(
+        {"success": False, "error": f"Invalid JSON payload: {exc.msg}"},
+        status_code=400,
+    )
 
 # Harvey process tracking
 _harvey_process: subprocess.Popen | None = None
@@ -351,6 +380,8 @@ async def get_settings():
         "IMAP_HOST", "IMAP_PORT", "IMAP_USERNAME", "IMAP_PASSWORD",
         "M365_CLIENT_ID", "M365_TENANT_ID",
         "REOON_API_KEY", "ZEROBOUNCE_API_KEY", "HUNTER_API_KEY",
+        "GEMINI_API_KEY", "GOOGLE_API_KEY", "GROQ_API_KEY",
+        "OPENROUTER_API_KEY", "XAI_API_KEY", "OLLAMA_BASE_URL",
     ]
     for key in all_keys:
         if key not in env_vars:
@@ -390,6 +421,14 @@ async def get_settings():
         "reoon_api_key_set": is_set("REOON_API_KEY"),
         "zerobounce_api_key_set": is_set("ZEROBOUNCE_API_KEY"),
         "hunter_api_key_set": is_set("HUNTER_API_KEY"),
+        "gemini_api_key_set": is_set("GEMINI_API_KEY") or is_set("GOOGLE_API_KEY"),
+        "groq_api_key_set": is_set("GROQ_API_KEY"),
+        "openrouter_api_key_set": is_set("OPENROUTER_API_KEY"),
+        "xai_api_key_set": is_set("XAI_API_KEY"),
+        "ollama_base_url": env_vars.get("OLLAMA_BASE_URL", "http://localhost:11434"),
+        "brain_provider": _active_provider(),
+        "brain_model": (_active_brain().model if _active_brain() else ""),
+        "xai_approved_paid": (getattr(_active_brain(), "xai_approved_paid", False) if _active_brain() else False),
     }
 
 
@@ -410,7 +449,9 @@ async def save_env_settings(request: Request):
                      "SMTP_HOST", "SMTP_PORT", "SMTP_USERNAME", "SMTP_PASSWORD",
                      "IMAP_HOST", "IMAP_PORT", "IMAP_USERNAME", "IMAP_PASSWORD",
                      "M365_CLIENT_ID", "M365_TENANT_ID",
-                     "REOON_API_KEY", "ZEROBOUNCE_API_KEY", "HUNTER_API_KEY"]:
+                     "REOON_API_KEY", "ZEROBOUNCE_API_KEY", "HUNTER_API_KEY",
+                     "GEMINI_API_KEY", "GROQ_API_KEY", "OPENROUTER_API_KEY",
+                     "XAI_API_KEY", "OLLAMA_BASE_URL"]:
             if key in data and data[key] is not None:
                 value = data[key]
                 if isinstance(value, bool) or not isinstance(value, (str, int, float)):
@@ -431,8 +472,34 @@ async def save_env_settings(request: Request):
                 _write_env_file(updates)
             except Exception as e:
                 logger.warning("Failed to write .env: %s", e)
-                return {"success": False, "message": "Could not write .env file."}
+                return JSONResponse({"success": False, "message": "Could not write .env file."}, status_code=500)
     return {"success": True}
+
+
+@app.get("/api/db/verify")
+async def api_db_verify():
+    """Verify SQLite database integrity and return diagnostic status."""
+    try:
+        state = _state()
+        await state.init_db()
+        res = await state.verify_integrity()
+        return {"success": res.get("ok", False), "integrity": res}
+    except Exception as e:
+        logger.exception("DB verify failed")
+        return JSONResponse({"success": False, "error": str(e)}, status_code=500)
+
+
+@app.post("/api/db/backup")
+async def api_db_backup(request: Request):
+    """Trigger a point-in-time SQLite snapshot backup."""
+    try:
+        state = _state()
+        await state.init_db()
+        dest = state.backup_db()
+        return {"success": True, "backup_path": str(dest)}
+    except Exception as e:
+        logger.exception("DB backup failed")
+        return JSONResponse({"success": False, "error": str(e)}, status_code=500)
 
 
 @app.post("/api/trulyinbox/connect")
@@ -885,9 +952,35 @@ async def _brain_status() -> dict:
     dashboard say "Codex paused: <why>" instead of looking healthy."""
     from harvey.brain import BRAIN_STATUS_KEY, active_brain_status
     rows = await query_db("SELECT value FROM settings WHERE key = ?", (BRAIN_STATUS_KEY,))
-    # Only the configured provider's health (a stale Codex pause isn't
-    # Claude's).
-    return active_brain_status(rows[0]["value"], _active_provider()) if rows else {}
+    active_prov = _active_provider()
+    status = active_brain_status(rows[0]["value"], active_prov) if rows else {}
+
+    # Auto-recover: if the active provider status in the DB is recorded as paused,
+    # re-verify if the provider has come back online (e.g. user started Ollama serve).
+    if status.get("status") == "paused" and active_prov and active_prov not in ("claude", "codex"):
+        try:
+            from harvey.config import load_env
+            from harvey.providers.router import TaskRouter
+            cfg = _active_brain()
+            if cfg and cfg.provider == active_prov:
+                router = TaskRouter(config=cfg.model_dump(), env=load_env().model_dump())
+                prov = router.get_provider(active_prov)
+                err = await prov.preflight()
+                if not err:
+                    ok_status = json.dumps({
+                        "provider": active_prov,
+                        "status": "ok",
+                        "reason": "",
+                        "since": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                        "kind": "auto_recovered",
+                    })
+                    state = _state()
+                    await state.set_setting(BRAIN_STATUS_KEY, ok_status)
+                    return {"provider": active_prov, "status": "ok", "reason": "", "kind": "auto_recovered"}
+        except Exception as e:
+            logger.debug(f"Brain status auto-recheck failed: {e}")
+
+    return status
 
 
 def _active_provider() -> str:
@@ -1270,8 +1363,23 @@ def _compliance_view() -> dict:
     try:
         from harvey.config import compliance_footer_lines, compliance_notice, load_config
         config = load_config()
+        notice = compliance_notice(config)
+        if notice:
+            try:
+                import sqlite3
+                with sqlite3.connect(str(DB_PATH)) as conn:
+                    cur = conn.cursor()
+                    cur.execute("SELECT value FROM settings WHERE key = 'sending_paused'")
+                    row = cur.fetchone()
+                    if row and row[0]:
+                        notice = (
+                            "CAN-SPAM requires a physical postal address before live sending can be enabled. "
+                            "Sending is currently paused under Pilot Evaluation Safety Hold."
+                        )
+            except Exception:
+                pass
         return {"footer": "\n".join(compliance_footer_lines(config)),
-                "compliance_notice": compliance_notice(config)}
+                "compliance_notice": notice}
     except Exception:
         return {"footer": "", "compliance_notice": ""}
 
@@ -1409,13 +1517,48 @@ async def mark_prospect_sent(prospect_id: str, request: Request):
 
 
 @app.post("/api/outbox/{item_id}/reject")
-async def outbox_reject(item_id: str):
+async def outbox_reject(item_id: str, request: Request = None):
+    try:
+        feedback = ""
+        if request:
+            try:
+                body = await request.json()
+                if isinstance(body, dict):
+                    feedback = str(body.get("feedback") or body.get("reason") or "").strip()
+            except Exception:
+                pass
+        state = _state()
+        await state.init_db()
+        item = await state.get_outbox_item(item_id)
+        if not await state.reject_outbox_item(item_id):
+            return _refuse("That email is already sending or sent, so it can't be rejected.")
+        
+        if feedback:
+            await state.add_feedback(
+                entity_type="outbox_draft",
+                entity_id=item_id,
+                comment=feedback,
+            )
+
+        await state.log_action("draft_rejected", "dashboard", {
+            "outbox_id": item_id,
+            "feedback": feedback,
+            "conversation_id": item.get("conversation_id", "") if item else "",
+            "prospect_id": item.get("prospect_id", "") if item else "",
+        })
+        return {"success": True, "feedback_saved": bool(feedback)}
+    except Exception as e:
+        return JSONResponse({"success": False, "message": str(e)}, status_code=500)
+
+
+@app.get("/api/feedback")
+async def get_all_feedback_api():
+    """Retrieve recorded operator review feedback for drafts and templates."""
     try:
         state = _state()
         await state.init_db()
-        if not await state.reject_outbox_item(item_id):
-            return _refuse("That email is already sending or sent, so it can't be rejected.")
-        return {"success": True}
+        items = await state.get_all_feedback()
+        return {"success": True, "feedback": items}
     except Exception as e:
         return JSONResponse({"success": False, "message": str(e)}, status_code=500)
 
@@ -1427,9 +1570,15 @@ async def sending_toggle(action: str):
     try:
         state = _state()
         await state.init_db()
+        current_paused = await state.get_setting("sending_paused") or ""
         if action == "pause":
             await state.set_setting("sending_paused", "paused from dashboard")
         else:
+            if "Pilot Evaluation" in current_paused or "Safety Hold" in current_paused:
+                return JSONResponse(
+                    {"success": False, "message": "Sending cannot be resumed while Pilot Evaluation Safety Hold is active."},
+                    status_code=403,
+                )
             await state.set_setting("sending_paused", "")
             await state.set_setting("bounce_count", "0")
         return {"success": True}
@@ -1468,7 +1617,10 @@ async def get_campaigns():
     footer = _compliance_view()["footer"]
     committed = await _harvey_committed_ids()
     hand_sent = await _hand_sent_ids()
+    paused_setting = await _first("SELECT value FROM settings WHERE key = 'sending_paused'", key="value")
+    is_paused = bool(paused_setting)
     for row in rows:
+        row["sending_paused"] = is_paused
         try:
             row["sequence"] = json.loads(row.get("sequence_json", "[]"))
         except (json.JSONDecodeError, TypeError):
@@ -1495,12 +1647,183 @@ async def get_campaigns():
                 r["id"] not in hand_sent and r["id"] not in committed
                 and (r.get("status") or "new") in HAND_SENDABLE_STATUSES
             )
-            # The Gmail button: only when Harvey can't send itself.
+            # The Gmail button: only when Harvey can't send itself and sending is not paused.
             r["can_send_by_hand"] = (
-                r["can_mark_sent"] and not harvey_sends
+                r["can_mark_sent"] and not harvey_sends and not is_paused
                 and (r.get("email_status") or "guess") in HAND_SENDABLE_EMAIL
             )
+        # Check outbox drafts for review status summary
+        camp_drafts = await query_db(
+            "SELECT id, step, status, subject, error FROM outbox WHERE campaign_id = ?",
+            (row["id"],),
+        )
+        row["outbox_drafts_summary"] = {
+            "total": len(camp_drafts),
+            "pending": sum(1 for d in camp_drafts if d.get("status") == "pending_review"),
+            "approved": sum(1 for d in camp_drafts if d.get("status") == "approved"),
+            "rejected": sum(1 for d in camp_drafts if d.get("status") == "rejected"),
+        }
     return rows
+
+
+# ── Automated Campaign Generation Endpoints ──
+
+@app.get("/api/campaigns/eligible-leads")
+async def get_eligible_leads_for_campaign(profile_id: str | None = None):
+    """Retrieve qualified leads eligible for campaign outreach, isolated by business profile."""
+    try:
+        from harvey.campaign_generator import CampaignGenerator
+
+        state = _state()
+        await state.init_db()
+
+        if not profile_id:
+            profiles = await state.get_business_profiles()
+            profile_id = profiles[0]["id"] if profiles else "prof_dental_in"
+
+        gen = CampaignGenerator(state=state)
+        leads = await gen.get_eligible_leads(profile_id)
+        return {"leads": leads, "count": len(leads), "profile_id": profile_id}
+    except Exception as e:
+        logger.exception("Failed to get eligible leads for campaign")
+        return JSONResponse({"error": str(e), "leads": [], "count": 0}, status_code=500)
+
+
+@app.post("/api/campaigns/generate-preview")
+async def generate_campaign_preview_endpoint(request: Request):
+    """Generate multi-step personalized outreach sequences for selected qualified leads."""
+    try:
+        from harvey.campaign_generator import CampaignGenerator
+
+        body = await request.json()
+        profile_id = body.get("profile_id") or "prof_dental_in"
+        prospect_ids = body.get("prospect_ids") or []
+
+        if not prospect_ids:
+            return JSONResponse({"success": False, "error": "No prospects selected for campaign"}, status_code=400)
+
+        state = _state()
+        await state.init_db()
+        gen = CampaignGenerator(state=state)
+        preview = await gen.generate_campaign_preview(
+            profile_id=profile_id,
+            prospect_ids=prospect_ids,
+            config=body,
+        )
+        return {"success": True, "preview": preview}
+    except Exception as e:
+        logger.exception("Campaign preview generation failed")
+        return JSONResponse({"success": False, "error": str(e)}, status_code=500)
+
+
+@app.post("/api/campaigns/stage")
+async def stage_campaign_endpoint(request: Request):
+    """Stage a confirmed campaign: Step 1 drafts land in Outbox as pending review; later steps stay scheduled."""
+    try:
+        from harvey.campaign_generator import CampaignGenerator
+
+        body = await request.json()
+        state = _state()
+        await state.init_db()
+        gen = CampaignGenerator(state=state)
+        res = await gen.stage_campaign_to_outbox(body)
+        return res
+    except Exception as e:
+        logger.exception("Failed to stage campaign to outbox")
+        return JSONResponse({"success": False, "error": str(e)}, status_code=500)
+
+
+# ── Campaign Review & Approval Endpoints ──
+
+@app.get("/api/campaigns/{campaign_id}/review")
+async def get_campaign_review_endpoint(campaign_id: str):
+    """Fetch complete review details for a campaign, including Step 1 drafts and audit log."""
+    try:
+        from harvey.campaign_review import CampaignReviewManager
+        state = _state()
+        await state.init_db()
+        manager = CampaignReviewManager(state=state)
+        res = await manager.get_campaign_review(campaign_id)
+        if not res.get("success") and not res.get("campaign"):
+            return JSONResponse(res, status_code=404)
+        return res
+    except Exception as e:
+        logger.exception(f"Failed to fetch review for campaign {campaign_id}")
+        return JSONResponse({"success": False, "error": str(e)}, status_code=500)
+
+
+@app.post("/api/campaigns/{campaign_id}/drafts/{draft_id}/approve")
+async def approve_campaign_draft_endpoint(campaign_id: str, draft_id: str):
+    """Explicitly approve a campaign Step 1 draft."""
+    try:
+        from harvey.campaign_review import CampaignReviewManager
+        state = _state()
+        await state.init_db()
+        manager = CampaignReviewManager(state=state)
+        res = await manager.approve_draft(campaign_id=campaign_id, draft_id=draft_id, operator="you")
+        if not res.get("success"):
+            status_code = res.get("status_code", 400)
+            return JSONResponse(res, status_code=status_code)
+        return res
+    except Exception as e:
+        logger.exception(f"Failed to approve draft {draft_id} in campaign {campaign_id}")
+        return JSONResponse({"success": False, "error": str(e)}, status_code=500)
+
+
+@app.post("/api/campaigns/{campaign_id}/drafts/{draft_id}/reject")
+async def reject_campaign_draft_endpoint(campaign_id: str, draft_id: str, request: Request):
+    """Explicitly reject a campaign draft. Mandatory rejection reason required."""
+    try:
+        from harvey.campaign_review import CampaignReviewManager
+        body = await request.json() if request else {}
+        reason = str(body.get("reason") or body.get("feedback") or "").strip()
+        state = _state()
+        await state.init_db()
+        manager = CampaignReviewManager(state=state)
+        res = await manager.reject_draft(campaign_id=campaign_id, draft_id=draft_id, reason=reason, operator="you")
+        if not res.get("success"):
+            status_code = res.get("status_code", 400)
+            return JSONResponse(res, status_code=status_code)
+        return res
+    except Exception as e:
+        logger.exception(f"Failed to reject draft {draft_id} in campaign {campaign_id}")
+        return JSONResponse({"success": False, "error": str(e)}, status_code=500)
+
+
+@app.post("/api/campaigns/{campaign_id}/drafts/{draft_id}/edit")
+async def edit_campaign_draft_endpoint(campaign_id: str, draft_id: str, request: Request):
+    """Edit subject and body of a campaign draft awaiting review."""
+    try:
+        from harvey.campaign_review import CampaignReviewManager
+        body = await request.json() if request else {}
+        subject = str(body.get("subject") or "").strip()
+        text = str(body.get("body") or "").strip()
+        state = _state()
+        await state.init_db()
+        manager = CampaignReviewManager(state=state)
+        res = await manager.edit_draft(campaign_id=campaign_id, draft_id=draft_id, subject=subject, body=text, operator="you")
+        if not res.get("success"):
+            status_code = res.get("status_code", 400)
+            return JSONResponse(res, status_code=status_code)
+        return res
+    except Exception as e:
+        logger.exception(f"Failed to edit draft {draft_id} in campaign {campaign_id}")
+        return JSONResponse({"success": False, "error": str(e)}, status_code=500)
+
+
+@app.get("/api/campaigns/{campaign_id}/audit")
+async def get_campaign_audit_endpoint(campaign_id: str):
+    """Fetch review and approval audit history for a campaign."""
+    try:
+        from harvey.campaign_review import CampaignReviewManager
+        state = _state()
+        await state.init_db()
+        manager = CampaignReviewManager(state=state)
+        history = await manager.get_audit_history(campaign_id)
+        return {"success": True, "campaign_id": campaign_id, "audit_history": history}
+    except Exception as e:
+        logger.exception(f"Failed to fetch audit history for campaign {campaign_id}")
+        return JSONResponse({"success": False, "error": str(e)}, status_code=500)
 
 
 @app.get("/api/prospects/{prospect_id}/opt-out")
@@ -1564,6 +1887,97 @@ async def undo_opt_out(prospect_id: str, request: Request):
     return {"success": True, "status": "replied"}
 
 
+# ── Company Research & Lead Enrichment Endpoints ──
+
+@app.get("/api/prospects/{prospect_id}/research")
+async def get_prospect_research(prospect_id: str):
+    """Retrieve the latest company research and enrichment data for a prospect."""
+    state = _state()
+    await state.init_db()
+    prospect = await state.get_prospect(prospect_id)
+    if not prospect:
+        return JSONResponse({"success": False, "error": f"Prospect '{prospect_id}' not found"}, status_code=404)
+
+    record = await state.get_lead_research(prospect_id)
+    if not record and prospect.company:
+        domain = ""
+        if prospect.email and "@" in prospect.email:
+            email_domain = prospect.email.split("@")[-1].strip().lower()
+            if email_domain not in ("gmail.com", "yahoo.com", "outlook.com", "hotmail.com", "icloud.com", "aol.com"):
+                domain = email_domain
+        if not domain and prospect.company:
+            domain = f"{re.sub(r'[^a-zA-Z0-9]', '', prospect.company).lower()}.com"
+        if domain:
+            record = await state.get_lead_research_by_domain(domain)
+
+    if record:
+        return {"success": True, "researched": True, "data": record}
+    return {"success": True, "researched": False, "data": None}
+
+
+@app.post("/api/prospects/{prospect_id}/research")
+async def run_prospect_research(prospect_id: str, request: Request):
+    """Execute on-demand company research and lead enrichment for a prospect."""
+    try:
+        data = await request.json() if await request.body() else {}
+        force_refresh = bool(data.get("force_refresh", False))
+        profile_id = str(data.get("profile_id", "") or "").strip()
+
+        state = _state()
+        await state.init_db()
+
+        prospect = await state.get_prospect(prospect_id)
+        if not prospect:
+            return JSONResponse({"success": False, "error": f"Prospect '{prospect_id}' not found"}, status_code=404)
+
+        from harvey.enrichment import CompanyEnrichmentService
+        service = CompanyEnrichmentService(state=state)
+        result = await service.enrich_prospect(
+            prospect_id=prospect_id,
+            profile_id=profile_id,
+            force_refresh=force_refresh,
+        )
+        return {"success": True, "data": result}
+    except Exception as e:
+        logger.exception(f"Error enriching prospect {prospect_id}: {e}")
+        return JSONResponse({"success": False, "error": str(e)}, status_code=500)
+
+
+@app.post("/api/companies/research-domain")
+async def run_domain_research(request: Request):
+    """Execute standalone company research by domain or company name."""
+    try:
+        data = await request.json() if await request.body() else {}
+        domain = str(data.get("domain", "") or "").strip()
+        company_name = str(data.get("company_name", "") or "").strip()
+        force_refresh = bool(data.get("force_refresh", False))
+
+        if not domain and not company_name:
+            return JSONResponse({"success": False, "error": "domain or company_name is required"}, status_code=400)
+
+        state = _state()
+        await state.init_db()
+
+        from harvey.enrichment import CompanyEnrichmentService
+        service = CompanyEnrichmentService(state=state)
+
+        clean_domain = domain or f"{re.sub(r'[^a-zA-Z0-9]', '', company_name).lower()}.com"
+        if not force_refresh:
+            cached = await state.get_lead_research_by_domain(clean_domain)
+            if cached:
+                cached["cache_hit"] = True
+                return {"success": True, "data": cached}
+
+        res_data = await service.web_provider.research_company(clean_domain, company_name)
+        if res_data.confidence < 0.3:
+            res_data = await service.sample_provider.research_company(clean_domain, company_name)
+
+        return {"success": True, "data": res_data.to_dict()}
+    except Exception as e:
+        logger.exception(f"Error researching domain: {e}")
+        return JSONResponse({"success": False, "error": str(e)}, status_code=500)
+
+
 @app.get("/api/conversations")
 async def get_conversations(awaiting: bool = False):
     rows = await query_db("""
@@ -1586,8 +2000,8 @@ async def get_conversations(awaiting: bool = False):
             emails.setdefault(e.pop("prospect_id"), []).append(e)
     cids = [r["id"] for r in rows]
     drafts = {d.pop("conversation_id"): d for d in (await query_db(
-        "SELECT id, conversation_id, subject, body, send_at FROM outbox "
-        f"WHERE kind = 'reply' AND status = 'pending_review' AND conversation_id IN ({_in(cids)}) "
+        "SELECT id, conversation_id, subject, body, status, send_at FROM outbox "
+        f"WHERE kind = 'reply' AND status IN ('pending_review', 'approved') AND conversation_id IN ({_in(cids)}) "
         "ORDER BY created_at", tuple(cids)) if cids else [])}
     for row in rows:
         try:
@@ -1908,6 +2322,757 @@ async def stop_discovery():
         return JSONResponse({"success": False, "message": str(e)}, status_code=500)
 
 
+# ── AI Lead Discovery & Qualification Endpoints ──
+
+@app.get("/api/discovery/profiles")
+async def get_discovery_business_profiles():
+    """Retrieve all configured business profiles."""
+    try:
+        state = _state()
+        await state.init_db()
+        profiles = await state.get_business_profiles()
+        return {"profiles": profiles}
+    except Exception as e:
+        logger.exception("Failed to get business profiles")
+        return JSONResponse({"error": str(e), "profiles": []}, status_code=500)
+
+
+@app.post("/api/discovery/profiles")
+async def create_or_update_business_profile(request: Request):
+    """Create or update a business profile."""
+    try:
+        body = await request.json()
+        state = _state()
+        await state.init_db()
+        profile = await state.create_business_profile(body)
+        return {"success": True, "profile": profile}
+    except Exception as e:
+        logger.exception("Failed to save business profile")
+        return JSONResponse({"success": False, "error": str(e)}, status_code=500)
+
+
+@app.delete("/api/discovery/profiles/{profile_id}")
+async def delete_business_profile(profile_id: str):
+    """Delete a custom business profile."""
+    try:
+        state = _state()
+        await state.init_db()
+        success = await state.delete_business_profile(profile_id)
+        if not success:
+            return JSONResponse({"success": False, "error": "Profile not found"}, status_code=404)
+        return {"success": True, "message": f"Profile {profile_id} deleted"}
+    except ValueError as e:
+        return JSONResponse({"success": False, "error": str(e)}, status_code=400)
+    except Exception as e:
+        logger.exception("Failed to delete business profile")
+        return JSONResponse({"success": False, "error": str(e)}, status_code=500)
+
+
+
+
+@app.get("/api/discovery/criteria")
+async def get_discovery_criteria():
+    """Return available search criteria suggestions and active profiles."""
+    try:
+        state = _state()
+        await state.init_db()
+        profiles = await state.get_business_profiles()
+        return {
+            "industries": [
+                "Healthcare / Dental",
+                "CleanTech / Renewable Energy",
+                "B2B Enterprise SaaS",
+                "Commercial HVAC & Facilities",
+                "Legal Services / Corporate Law",
+                "Accounting & Tax Advisory",
+                "Specialized Medical Clinics",
+            ],
+            "company_sizes": [
+                "1-10 employees",
+                "10-25 employees",
+                "15-50 employees",
+                "25-75 employees",
+                "50-200 employees",
+                "200+ employees",
+            ],
+            "business_types": [
+                "Direct B2B Service",
+                "Specialized Private Practice",
+                "Clean Energy Systems Integrator",
+                "Cloud SaaS Platform",
+                "Commercial Contracting",
+                "Corporate Law Partnership",
+                "Financial Advisory",
+            ],
+            "use_cases": [
+                "Appointment triage & follow-up",
+                "Commercial contract proposal follow-up",
+                "Consultation intake qualification",
+                "Lead nurturing for high-ticket services",
+                "Speed-to-lead for inbound bid requests",
+            ],
+            "profiles": profiles,
+        }
+    except Exception as e:
+        logger.exception("Failed to get discovery criteria")
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+@app.get("/api/discovery/leads")
+async def get_discovered_leads(
+    profile_id: str | None = None,
+    status: str = "all",
+    search: str | None = None,
+):
+    """Retrieve discovered candidate leads with duplicate detection and review status."""
+    try:
+        from harvey.qualification import check_discovered_lead_duplicates
+
+        state = _state()
+        await state.init_db()
+        leads = await state.get_discovered_leads(profile_id)
+
+        # Check CRM duplicate status for each lead
+        leads = await check_discovered_lead_duplicates(leads, state)
+
+        # Load active business profile to provide accurate qualification context
+        active_profile = {}
+        if profile_id:
+            active_profile = await state.get_business_profile(profile_id) or {}
+        else:
+            profiles = await state.get_business_profiles()
+            active_profile = next((p for p in profiles if p.get("is_default")), profiles[0] if profiles else {})
+
+        # Ensure bant_breakdown is populated with authoritative scoring
+        from harvey.qualification import LeadQualifier, ResearchProfile, compute_authoritative_bant
+        _qualifier = LeadQualifier()
+        for l in leads:
+            if not l.get("bant_breakdown"):
+                try:
+                    rp = ResearchProfile(
+                        company_name=l.get("company_name", ""),
+                        domain=l.get("domain", ""),
+                        industry=l.get("industry", ""),
+                        location=l.get("location", ""),
+                        company_size=l.get("company_size", ""),
+                        potential_needs=l.get("potential_needs", []) or [],
+                        decision_maker=l.get("decision_maker", {}) or {},
+                    )
+                    l["bant_breakdown"] = compute_authoritative_bant(rp, active_profile)
+                except Exception:
+                    pass
+
+        # Compute accurate counts over ALL leads before applying status filter
+        total_count = len(leads)
+        in_crm_count = sum(1 for l in leads if l.get("in_crm") or l.get("added_to_crm") or l.get("candidate_status") == "approved")
+        rejected_count = sum(1 for l in leads if l.get("candidate_status") in ("rejected", "skipped"))
+        pending_count = sum(1 for l in leads if not (l.get("in_crm") or l.get("added_to_crm") or l.get("candidate_status") in ("approved", "rejected", "skipped")))
+
+        # Filter by candidate_status if specified
+        filtered_leads = leads
+        if status and status != "all":
+            if status == "pending":
+                filtered_leads = [
+                    l for l in leads
+                    if not (l.get("in_crm") or l.get("added_to_crm") or l.get("candidate_status") in ("approved", "rejected", "skipped"))
+                ]
+            elif status in ("approved", "in_crm"):
+                filtered_leads = [
+                    l for l in leads
+                    if l.get("in_crm") or l.get("added_to_crm") or l.get("candidate_status") == "approved"
+                ]
+            elif status in ("rejected", "skipped"):
+                filtered_leads = [
+                    l for l in leads
+                    if l.get("candidate_status") in ("rejected", "skipped")
+                ]
+
+        if search and search.strip():
+            q = search.strip().lower()
+            filtered_leads = [
+                l for l in filtered_leads
+                if q in (l.get("company_name") or "").lower()
+                or q in (l.get("domain") or "").lower()
+                or q in (l.get("industry") or "").lower()
+                or q in (l.get("location") or "").lower()
+                or q in (l.get("description") or "").lower()
+            ]
+
+        return {
+            "leads": filtered_leads,
+            "count": total_count,
+            "pending_count": pending_count,
+            "approved_count": in_crm_count,
+            "rejected_count": rejected_count,
+        }
+    except Exception as e:
+        logger.exception("Failed to get discovered leads")
+        return JSONResponse({"error": str(e), "leads": []}, status_code=500)
+
+
+@app.post("/api/discovery/search")
+async def run_discovery_search(request: Request):
+    """Discover candidate companies matching criteria or profile with strict fact honesty."""
+    try:
+        from harvey.qualification import (
+            SampleLeadDiscoveryProvider,
+            LeadQualifier,
+            check_discovered_lead_duplicates,
+        )
+
+        body = await request.json() if request.headers.get("content-type") == "application/json" else {}
+        profile_id = body.get("profile_id")
+        limit = int(body.get("limit") or 5)
+
+        state = _state()
+        await state.init_db()
+
+        # Build composite profile from saved profile + custom overrides
+        profile = {}
+        if profile_id:
+            profile = await state.get_business_profile(profile_id) or {}
+
+        # Apply search criteria overrides if provided
+        if body.get("industry"):
+            profile["industry"] = body["industry"]
+        if body.get("location"):
+            profile["geography"] = body["location"]
+        if body.get("geography_scope"):
+            profile["geography_scope"] = body["geography_scope"]
+        if body.get("company_size"):
+            profile["company_size"] = body["company_size"]
+        if body.get("business_type"):
+            profile["business_type"] = body["business_type"]
+        if body.get("use_cases"):
+            profile["target_use_cases"] = body["use_cases"]
+
+        if not profile.get("industry"):
+            profile["industry"] = "Healthcare / Dental"
+        if not profile.get("id"):
+            profile["id"] = profile_id or "custom_search"
+
+        provider = SampleLeadDiscoveryProvider()
+        candidates = await provider.discover(profile, limit=limit)
+        qualifier = LeadQualifier()
+
+        results = []
+        for candidate in candidates:
+            qual = qualifier.qualify(candidate, profile)
+            lead_dict = candidate.to_dict()
+            lead_dict.update({
+                "profile_id": profile.get("id", ""),
+                "score": qual.score,
+                "tier": qual.tier,
+                "reasons": qual.reasons,
+                "missing_fields": qual.missing_information,
+                "confidence": qual.confidence,
+                "is_qualified": qual.is_qualified,
+                "candidate_status": "pending",
+                "business_type": body.get("business_type") or candidate.business_type or candidate.industry,
+                "target_use_cases": body.get("use_cases") or candidate.relevant_use_cases or candidate.potential_needs,
+                "bant_breakdown": qual.bant_breakdown,
+            })
+            lead_id = await state.save_discovered_lead(lead_dict)
+            lead_dict["id"] = lead_id
+            results.append(lead_dict)
+
+        # Deduplicate candidate results by normalized domain
+        seen_domains = set()
+        deduped_results = []
+        for r in results:
+            dom = (r.get("domain") or "").strip().lower()
+            if dom:
+                if dom in seen_domains:
+                    continue
+                seen_domains.add(dom)
+            deduped_results.append(r)
+        results = deduped_results
+
+        # Run duplicate detection against CRM
+        results = await check_discovered_lead_duplicates(results, state)
+
+        return {
+            "success": True,
+            "profile_id": profile.get("id"),
+            "profile_name": profile.get("name") or profile.get("industry"),
+            "discovered_count": len(results),
+            "leads": results,
+        }
+    except json.JSONDecodeError as e:
+        return JSONResponse({"success": False, "error": f"Invalid JSON payload: {e.msg}"}, status_code=400)
+    except Exception as e:
+        logger.exception("Discovery search failed")
+        return JSONResponse({"success": False, "error": str(e)}, status_code=500)
+
+
+@app.post("/api/discovery/sample-discover")
+async def run_sample_discovery(request: Request):
+    """Run sample lead discovery using SampleLeadDiscoveryProvider and qualify candidate leads."""
+    try:
+        from harvey.qualification import (
+            SampleLeadDiscoveryProvider,
+            LeadQualifier,
+            check_discovered_lead_duplicates,
+        )
+
+        body = await request.json() if request.headers.get("content-type") == "application/json" else {}
+        profile_id = body.get("profile_id")
+        limit = int(body.get("limit") or 5)
+
+        state = _state()
+        await state.init_db()
+
+        profile = {}
+        if profile_id:
+            profile = await state.get_business_profile(profile_id) or {}
+        if not profile:
+            profiles = await state.get_business_profiles()
+            if profiles:
+                profile = profiles[0]
+
+        if not profile.get("industry"):
+            profile["industry"] = "Healthcare / Dental"
+        if not profile.get("id"):
+            profile["id"] = profile_id or "default_sample"
+
+        provider = SampleLeadDiscoveryProvider()
+        candidates = await provider.discover(profile, limit=limit)
+        qualifier = LeadQualifier()
+
+        results = []
+        for candidate in candidates:
+            qual = qualifier.qualify(candidate, profile)
+            lead_dict = candidate.to_dict()
+            lead_dict.update({
+                "profile_id": profile.get("id", ""),
+                "score": qual.score,
+                "tier": qual.tier,
+                "reasons": qual.reasons,
+                "missing_fields": qual.missing_information,
+                "confidence": qual.confidence,
+                "is_qualified": qual.is_qualified,
+                "candidate_status": "pending",
+                "business_type": candidate.business_type or candidate.industry,
+                "target_use_cases": candidate.relevant_use_cases or candidate.potential_needs,
+                "bant_breakdown": qual.bant_breakdown,
+            })
+            lead_id = await state.save_discovered_lead(lead_dict)
+            lead_dict["id"] = lead_id
+
+            # Save research dossier if available
+            try:
+                dm_list = []
+                if hasattr(candidate, "decision_maker") and candidate.decision_maker:
+                    dm_list = [candidate.decision_maker]
+                elif hasattr(candidate, "decision_makers") and candidate.decision_makers:
+                    dm_list = [dm.to_dict() if hasattr(dm, "to_dict") else dm for dm in candidate.decision_makers]
+
+                research_dossier = {
+                    "prospect_id": lead_id,
+                    "lead_id": lead_id,
+                    "company_name": getattr(candidate, "company_name", ""),
+                    "domain": getattr(candidate, "domain", ""),
+                    "website": getattr(candidate, "website", ""),
+                    "industry": getattr(candidate, "industry", ""),
+                    "location": getattr(candidate, "location", ""),
+                    "employee_count": getattr(candidate, "company_size", "") or getattr(candidate, "employee_count", ""),
+                    "sources": getattr(candidate, "sources", []) or [],
+                    "verified_facts": getattr(candidate, "verified_facts", []) or [],
+                    "potential_needs": getattr(candidate, "potential_needs", []) or [],
+                    "decision_makers": dm_list,
+                    "raw_notes": getattr(candidate, "raw_notes", "") or getattr(candidate, "description", ""),
+                    "fit_score": qual.score,
+                    "fit_tier": qual.tier,
+                    "fit_reasons": qual.reasons,
+                    "confidence": qual.confidence,
+                }
+                await state.save_lead_research(research_dossier)
+            except Exception as re_err:
+                logger.warning(f"Failed to auto-save lead research dossier for {candidate.company_name}: {re_err}")
+
+            results.append(lead_dict)
+
+        seen_domains = set()
+        deduped_results = []
+        for r in results:
+            dom = (r.get("domain") or "").strip().lower()
+            if dom:
+                if dom in seen_domains:
+                    continue
+                seen_domains.add(dom)
+            deduped_results.append(r)
+        results = deduped_results
+
+        results = await check_discovered_lead_duplicates(results, state)
+
+        return {
+            "success": True,
+            "profile_id": profile.get("id"),
+            "profile_name": profile.get("name") or profile.get("industry"),
+            "discovered_count": len(results),
+            "leads": results,
+        }
+    except json.JSONDecodeError as e:
+        return JSONResponse({"success": False, "error": f"Invalid JSON payload: {e.msg}"}, status_code=400)
+    except Exception as e:
+        logger.exception("Sample discovery failed")
+        return JSONResponse({"success": False, "error": str(e)}, status_code=500)
+
+
+@app.post("/api/discovery/candidates/import")
+async def import_candidates(request: Request):
+    """Review & import approved candidate leads into the CRM pipeline."""
+    try:
+        body = await request.json()
+        lead_ids = body.get("lead_ids")
+        if not lead_ids and body.get("lead_id"):
+            lead_ids = [body.get("lead_id")]
+
+        if not lead_ids or not isinstance(lead_ids, list):
+            return JSONResponse({"success": False, "error": "lead_ids list is required"}, status_code=400)
+
+        target_stage = body.get("target_stage") or "New"
+        notes = body.get("notes") or ""
+
+        state = _state()
+        await state.init_db()
+
+        result = await state.batch_import_discovered_leads(lead_ids, target_stage=target_stage)
+        return result
+    except Exception as e:
+        logger.exception("Failed to import candidates")
+        return JSONResponse({"success": False, "error": str(e)}, status_code=500)
+
+
+@app.post("/api/discovery/candidates/status")
+async def update_candidate_status(request: Request):
+    """Update candidate review status (skip or reject candidate leads)."""
+    try:
+        body = await request.json()
+        lead_ids = body.get("lead_ids")
+        if not lead_ids and body.get("lead_id"):
+            lead_ids = [body.get("lead_id")]
+
+        status = body.get("status")
+        if not status or status not in ("pending", "approved", "rejected", "skipped"):
+            return JSONResponse({"success": False, "error": "Valid status ('pending', 'rejected', 'skipped') required"}, status_code=400)
+
+        reason = body.get("reason") or ""
+        state = _state()
+        await state.init_db()
+
+        result = await state.batch_update_discovered_leads_status(lead_ids, status=status, reason=reason)
+        return result
+    except Exception as e:
+        logger.exception("Failed to update candidate status")
+        return JSONResponse({"success": False, "error": str(e)}, status_code=500)
+
+
+@app.post("/api/discovery/candidates/{lead_id}/qualify")
+async def qualify_candidate_lead(lead_id: str, request: Request):
+    """Manually qualify a candidate lead (override automated scoring)."""
+    try:
+        body = await request.json() if await request.body() else {}
+        reason = body.get("reason", "Manual qualification override by operator")
+        state = _state()
+        await state.init_db()
+
+        lead = await state.get_discovered_lead(lead_id)
+        if not lead:
+            return JSONResponse({"success": False, "error": f"Lead {lead_id} not found"}, status_code=404)
+
+        ok = await state.update_lead_qualification_override(lead_id, is_qualified=True, reason=reason)
+        return {"success": ok, "lead_id": lead_id, "is_qualified": True, "message": "Lead marked as Qualified."}
+    except Exception as e:
+        logger.exception(f"Failed to qualify lead {lead_id}")
+        return JSONResponse({"success": False, "error": str(e)}, status_code=500)
+
+
+@app.post("/api/discovery/candidates/{lead_id}/disqualify")
+async def disqualify_candidate_lead(lead_id: str, request: Request):
+    """Manually disqualify a candidate lead with an explicit reason."""
+    try:
+        body = await request.json() if await request.body() else {}
+        reason = body.get("reason", "").strip()
+        if not reason:
+            return JSONResponse({"success": False, "error": "A disqualification reason is required."}, status_code=400)
+
+        state = _state()
+        await state.init_db()
+
+        lead = await state.get_discovered_lead(lead_id)
+        if not lead:
+            return JSONResponse({"success": False, "error": f"Lead {lead_id} not found"}, status_code=404)
+
+        ok = await state.update_lead_qualification_override(lead_id, is_qualified=False, reason=reason)
+        return {"success": ok, "lead_id": lead_id, "is_qualified": False, "message": f"Lead disqualified: {reason}"}
+    except Exception as e:
+        logger.exception(f"Failed to disqualify lead {lead_id}")
+        return JSONResponse({"success": False, "error": str(e)}, status_code=500)
+
+
+@app.get("/api/crm/pipeline")
+async def get_crm_pipeline(
+    stage: str | None = None,
+    search: str | None = None,
+    sort_by: str = "score",
+):
+    """Retrieve all leads in the CRM pipeline with stage breakdown and filters."""
+    try:
+        state = _state()
+        await state.init_db()
+        data = await state.get_pipeline_leads(stage=stage, search=search, sort_by=sort_by)
+        return {"success": True, **data}
+    except Exception as e:
+        logger.exception("Failed to get CRM pipeline")
+        return JSONResponse({"success": False, "error": str(e)}, status_code=500)
+
+
+@app.post("/api/crm/prospects/{prospect_id}/pipeline")
+async def update_prospect_crm_pipeline(prospect_id: str, request: Request):
+    """Update CRM pipeline stage, notes, next action, and follow-up date for a prospect."""
+    try:
+        body = await request.json()
+        stage = body.get("stage")
+        notes = body.get("notes")
+        next_action = body.get("next_action")
+        follow_up_date = body.get("follow_up_date")
+
+        state = _state()
+        await state.init_db()
+        updated = await state.update_prospect_pipeline(
+            prospect_id,
+            stage=stage,
+            notes=notes,
+            next_action=next_action,
+            follow_up_date=follow_up_date,
+        )
+        return {"success": True, "prospect": updated}
+    except ValueError as ve:
+        return JSONResponse({"success": False, "error": str(ve)}, status_code=400)
+    except Exception as e:
+        logger.exception("Failed to update prospect pipeline")
+        return JSONResponse({"success": False, "error": str(e)}, status_code=500)
+
+
+@app.get("/api/crm/prospects/{prospect_id}")
+async def get_crm_prospect_detail(prospect_id: str):
+    """Get full 360-degree CRM detail for a prospect."""
+    try:
+        state = _state()
+        await state.init_db()
+        prospect = await state.get_prospect(prospect_id)
+        if not prospect:
+            return JSONResponse({"success": False, "error": "Prospect not found"}, status_code=404)
+
+        comp = await state.get_company(prospect.company_id) if prospect.company_id else None
+        research = await state.get_lead_research(prospect_id)
+
+        # Get recent activity
+        async with state._connect() as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(
+                "SELECT * FROM actions WHERE details_json LIKE ? ORDER BY created_at DESC LIMIT 20",
+                (f"%{prospect_id}%",),
+            ) as cursor:
+                actions = [dict(r) for r in await cursor.fetchall()]
+
+        return {
+            "success": True,
+            "prospect": prospect.model_dump() if hasattr(prospect, "model_dump") else prospect.dict(),
+            "company": comp.to_dict() if comp and hasattr(comp, "to_dict") else (comp.__dict__ if comp else None),
+            "research": research,
+            "activity": actions,
+        }
+    except Exception as e:
+        logger.exception("Failed to get CRM prospect detail")
+        return JSONResponse({"success": False, "error": str(e)}, status_code=500)
+
+
+@app.post("/api/discovery/add-to-pipeline")
+async def add_lead_to_pipeline(request: Request):
+    """Explicitly add a qualified discovered lead to the canonical CRM pipeline."""
+    try:
+        body = await request.json()
+        lead_id = body.get("lead_id")
+        if not lead_id:
+            return JSONResponse({"success": False, "error": "lead_id is required"}, status_code=400)
+
+        state = _state()
+        await state.init_db()
+        result = await state.add_discovered_lead_to_pipeline(lead_id)
+        return {"success": True, "result": result}
+    except Exception as e:
+        logger.exception("Failed to add lead to pipeline")
+        return JSONResponse({"success": False, "error": str(e)}, status_code=500)
+
+
+# ── AI-Powered Personalized Outreach Draft Endpoints ──
+
+@app.post("/api/outreach/drafts/generate")
+async def generate_outreach_draft(request: Request):
+    """Generate an AI-powered evidence-grounded outreach email draft for a qualified lead."""
+    try:
+        from harvey.outreach_drafts import OutreachDraftGenerator
+
+        body = await request.json() if request.headers.get("content-type") == "application/json" else {}
+        lead_id = body.get("lead_id")
+        prospect_id = body.get("prospect_id")
+        profile_id = body.get("profile_id")
+        custom_instructions = body.get("custom_instructions") or ""
+        fallback_mode = bool(body.get("fallback_mode", False))
+
+        if not lead_id and not prospect_id:
+            return JSONResponse({"success": False, "error": "Either lead_id or prospect_id is required."}, status_code=400)
+
+        state = _state()
+        await state.init_db()
+
+        generator = OutreachDraftGenerator(state)
+        try:
+            context = await generator.build_context(lead_id=lead_id, prospect_id=prospect_id, profile_id=profile_id)
+        except ValueError as ve:
+            return JSONResponse({"success": False, "error": str(ve)}, status_code=404)
+
+        result = await generator.generate_draft(
+            context,
+            custom_instructions=custom_instructions,
+            fallback_mode=fallback_mode,
+        )
+
+        status_code = 200 if result.get("success") else (400 if result.get("code") == "lead_unqualified" else 503)
+        return JSONResponse(result, status_code=status_code)
+    except json.JSONDecodeError as e:
+        return JSONResponse({"success": False, "error": f"Invalid JSON payload: {e.msg}"}, status_code=400)
+    except Exception as e:
+        logger.exception("Failed to generate outreach draft")
+        return JSONResponse({"success": False, "error": str(e)}, status_code=500)
+
+
+@app.get("/api/outreach/drafts")
+async def list_outreach_drafts(
+    lead_id: str | None = None,
+    prospect_id: str | None = None,
+    status: str | None = None,
+):
+    """Retrieve saved outreach drafts."""
+    try:
+        state = _state()
+        await state.init_db()
+        drafts = await state.get_outreach_drafts(lead_id=lead_id, prospect_id=prospect_id, status=status)
+        return {"success": True, "drafts": drafts, "count": len(drafts)}
+    except Exception as e:
+        logger.exception("Failed to list outreach drafts")
+        return JSONResponse({"success": False, "error": str(e)}, status_code=500)
+
+
+@app.get("/api/outreach/drafts/{draft_id}")
+async def get_outreach_draft_detail(draft_id: str):
+    """Retrieve details of a specific outreach draft."""
+    try:
+        state = _state()
+        await state.init_db()
+        draft = await state.get_outreach_draft(draft_id)
+        if not draft:
+            return JSONResponse({"success": False, "error": "Draft not found"}, status_code=404)
+        return {"success": True, "draft": draft}
+    except Exception as e:
+        logger.exception("Failed to get outreach draft detail")
+        return JSONResponse({"success": False, "error": str(e)}, status_code=500)
+
+
+@app.post("/api/outreach/drafts")
+async def save_outreach_draft(request: Request):
+    """Save or update an outreach draft and update CRM pipeline to Outreach Draft Ready."""
+    try:
+        from harvey.outreach_drafts import OutreachDraftGenerator
+
+        body = await request.json()
+        draft_data = body.get("draft") or body
+        force = bool(body.get("force", False))
+
+        if not draft_data.get("subject") or not draft_data.get("body"):
+            return JSONResponse({"success": False, "error": "Draft subject and body are required."}, status_code=400)
+
+        state = _state()
+        await state.init_db()
+
+        generator = OutreachDraftGenerator(state)
+        res = await generator.save_draft(draft_data, force=force)
+        status_code = 200 if res.get("success") else 409
+        return JSONResponse(res, status_code=status_code)
+    except json.JSONDecodeError as e:
+        return JSONResponse({"success": False, "error": f"Invalid JSON payload: {e.msg}"}, status_code=400)
+    except Exception as e:
+        logger.exception("Failed to save outreach draft")
+        return JSONResponse({"success": False, "error": str(e)}, status_code=500)
+
+
+@app.put("/api/outreach/drafts/{draft_id}")
+async def edit_outreach_draft(draft_id: str, request: Request):
+    """Edit subject, body, or recipient of an existing draft."""
+    try:
+        from harvey.outreach_drafts import OutreachDraftGenerator
+
+        body = await request.json()
+        subject = body.get("subject") or ""
+        body_text = body.get("body") or ""
+        recipient_email = body.get("recipient_email")
+
+        if not subject or not body_text:
+            return JSONResponse({"success": False, "error": "Subject and body cannot be empty."}, status_code=400)
+
+        state = _state()
+        await state.init_db()
+
+        generator = OutreachDraftGenerator(state)
+        res = await generator.edit_draft(draft_id, subject=subject, body=body_text, recipient_email=recipient_email)
+        status_code = 200 if res.get("success") else 404
+        return JSONResponse(res, status_code=status_code)
+    except Exception as e:
+        logger.exception("Failed to edit outreach draft")
+        return JSONResponse({"success": False, "error": str(e)}, status_code=500)
+
+
+@app.post("/api/outreach/drafts/{draft_id}/review")
+async def mark_draft_ready_for_review(draft_id: str):
+    """Mark an outreach draft as ready for manual review and stage it into Outbox pending_review."""
+    try:
+        from harvey.outreach_drafts import OutreachDraftGenerator
+
+        state = _state()
+        await state.init_db()
+
+        generator = OutreachDraftGenerator(state)
+        res = await generator.mark_ready_for_review(draft_id)
+        status_code = 200 if res.get("success") else 400
+        return JSONResponse(res, status_code=status_code)
+    except Exception as e:
+        logger.exception("Failed to mark draft ready for review")
+        return JSONResponse({"success": False, "error": str(e)}, status_code=500)
+
+
+@app.post("/api/outreach/drafts/{draft_id}/cancel")
+async def cancel_outreach_draft(draft_id: str, request: Request):
+    """Cancel an outreach draft and its associated outbox item."""
+    try:
+        from harvey.outreach_drafts import OutreachDraftGenerator
+
+        body = await request.json() if request.headers.get("content-type") == "application/json" else {}
+        reason = body.get("reason") or "Cancelled by operator"
+
+        state = _state()
+        await state.init_db()
+
+        generator = OutreachDraftGenerator(state)
+        res = await generator.cancel_draft(draft_id, reason=reason)
+        status_code = 200 if res.get("success") else 404
+        return JSONResponse(res, status_code=status_code)
+    except Exception as e:
+        logger.exception("Failed to cancel outreach draft")
+        return JSONResponse({"success": False, "error": str(e)}, status_code=500)
+
+
 def _parse_ts(value) -> datetime | None:
     """SQLite CURRENT_TIMESTAMP / isoformat strings -> naive UTC datetime."""
     if not value:
@@ -1987,12 +3152,25 @@ async def get_live_status():
         if isinstance(ids, list):
             drafted.update(i for i in ids if isinstance(i, str))
     sent = {p["id"] for p in prospects if p.get("status") in SENT_STATUSES}
+    paused_setting = await _first("SELECT value FROM settings WHERE key = 'sending_paused'", key="value")
+    is_paused = bool(paused_setting)
+
+    # Real delivered provider count strictly from outbox table
+    actual_sent_prospects = {
+        r["prospect_id"] for r in await query_db(
+            "SELECT DISTINCT prospect_id FROM outbox WHERE status = 'sent' AND prospect_id IS NOT NULL"
+        ) if r.get("prospect_id")
+    }
+    real_sent_count = len(actual_sent_prospects & drafted)
+    mock_replied_count = len(sent & drafted) - real_sent_count
+    effective_sent_count = real_sent_count if is_paused else len(sent & drafted)
+
     # Who is left for the user to send by hand: only when Harvey can't send
-    # itself, and never someone Harvey has queued, sent to, or can't reach.
+    # itself and sending is not paused with a safety hold.
     harvey_sends = _harvey_can_send()
     awaiting_review = await _scalar("SELECT COUNT(*) FROM outbox WHERE status = 'pending_review'")
     by_hand: set[str] = set()
-    if not harvey_sends:
+    if not harvey_sends and not is_paused:
         skip = await _harvey_committed_ids() | await _hand_sent_ids()
         by_hand = {p["id"] for p in prospects
                    if p["id"] in drafted and p["id"] not in skip
@@ -2052,6 +3230,13 @@ async def get_live_status():
     if no_site:
         read_detail += f" · {no_site} have no website (skipped)"
 
+    sent_detail = (
+        f"{real_sent_count} of {len(drafted)} sent (0 delivered via provider · {mock_replied_count} test/mock replied) · hold active"
+        if is_paused and mock_replied_count > 0
+        else (f"{real_sent_count} of {len(drafted)} sent · safety hold active" if is_paused
+              else f"{real_sent_count} of {len(drafted)} sent")
+    )
+
     steps = [
         step("Find businesses", companies, 0, finding,
              f"{companies} businesses found", info=True),
@@ -2064,14 +3249,15 @@ async def get_live_status():
              + (f" · {by_status['invalid']} bad" if by_status.get("invalid") else "")),
         step("Write first emails", len(drafted), len(deliverable | drafted), False,
              f"{len(drafted)} written · see Campaigns"),
-        step("Sent", len(sent & drafted), len(drafted), False,
-             f"{len(sent & drafted)} of {len(drafted)} sent"),
+        step("Sent", effective_sent_count, len(drafted), False, sent_detail),
         step("Replies", replies, 0, False,
              f"{replies} replies" if replies else "No replies yet", info=True),
     ]
 
     next_tab = ""   # where the next step is done, when it's done in the dashboard
-    if reading or finding:
+    if is_paused:
+        next_up, next_tab = "Sending is paused (Pilot Evaluation Safety Hold) — drafts remain safely staged for review.", "outbox"
+    elif reading or finding:
         next_up = "Wait — Harvey is working. This page updates by itself."
     elif finding_emails:
         next_up = "Wait — emails are being found."
@@ -2196,8 +3382,8 @@ async def get_today():
             items.append({
                 "key": "paused", "tone": "bad",
                 "title": "Sending is paused",
-                "detail": str(paused) + ". Nothing will go out until you resume it.",
-                "action": "Review and resume", "tab": "outbox",
+                "detail": str(paused) + ". All drafts remain safely staged for review.",
+                "action": "Review staged drafts", "tab": "outbox",
             })
 
         # Cold email waiting on the optional Precleared check: its free
@@ -2607,6 +3793,1098 @@ WEB_DIR = (Path(__file__).resolve().parent / "web")
 
 TEXT_TYPES = {".css": "text/css", ".js": "text/javascript", ".svg": "image/svg+xml"}
 BINARY_TYPES = {".woff2": "font/woff2", ".woff": "font/woff", ".png": "image/png"}
+
+
+
+@app.get("/api/brain/providers")
+async def get_brain_providers():
+    """Return status, readiness, and model catalog for all supported AI providers."""
+    try:
+        from harvey.config import load_brain_config, load_env
+        from harvey.providers.router import TaskRouter
+        cfg = load_brain_config()
+        router = TaskRouter(config=cfg.model_dump(), env=load_env().model_dump())
+        providers_status = await router.get_all_providers_status()
+        return {
+            "active_provider": cfg.provider,
+            "active_model": cfg.model,
+            "task_routing": cfg.task_routing,
+            "fallback_providers": cfg.fallback_providers,
+            "xai_approved_paid": cfg.xai_approved_paid,
+            "providers": providers_status,
+        }
+    except Exception as e:
+        logger.exception("Failed to load brain providers")
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+@app.post("/api/brain/select")
+async def select_brain_provider(request: Request):
+    """Switch active brain provider, model, or task routing in config."""
+    try:
+        body = await request.json()
+        provider = str(body.get("provider") or "").strip().lower()
+        model = str(body.get("model") or "").strip()
+        task_routing = body.get("task_routing")
+        xai_approved_paid = body.get("xai_approved_paid")
+
+        from harvey.config import BRAIN_PROVIDERS, _resolve_config_file
+        if provider and provider not in BRAIN_PROVIDERS:
+            return JSONResponse({"success": False, "message": f"Unsupported provider '{provider}'."}, status_code=400)
+
+        # Strict Paid safeguard
+        if provider == "xai" and not xai_approved_paid:
+            return JSONResponse({
+                "success": False,
+                "message": "xAI is a paid provider. You must explicitly approve paid usage to select it."
+            }, status_code=400)
+
+        config_path = _resolve_config_file()
+        raw = read_user_text(config_path)
+        data = yaml.safe_load(raw) or {}
+        if "brain" not in data or not isinstance(data["brain"], dict):
+            data["brain"] = {}
+
+        if provider:
+            data["brain"]["provider"] = provider
+        if model is not None:
+            data["brain"]["model"] = model
+        if task_routing is not None:
+            data["brain"]["task_routing"] = bool(task_routing)
+        if xai_approved_paid is not None:
+            data["brain"]["xai_approved_paid"] = bool(xai_approved_paid)
+
+        with open(config_path, "w", encoding="utf-8") as f:
+            yaml.dump(data, f, default_flow_style=False, sort_keys=False)
+
+        return {"success": True, "provider": data["brain"].get("provider"), "model": data["brain"].get("model")}
+    except Exception as e:
+        logger.exception("Failed to update brain config")
+        return JSONResponse({"success": False, "message": str(e)}, status_code=500)
+
+
+# =====================================================================
+# RAG (Grounding Knowledge Base) Endpoints
+# =====================================================================
+
+@app.get("/api/rag/status")
+async def rag_status():
+    """Return RAG indexing status and vector store metrics."""
+    try:
+        from harvey.rag.store import VectorStore
+        store = VectorStore()
+        total_chunks = store.count()
+        docs = store.list_documents()
+        return {
+            "success": True,
+            "status": {
+                "ready": True,
+                "total_chunks": total_chunks,
+                "document_count": len(docs),
+                "embedding_model": store.embeddings.model,
+                "embedding_dim": 768,
+                "store_path": str(store.persist_dir),
+            },
+        }
+    except Exception as e:
+        logger.exception("Error checking RAG status")
+        return JSONResponse({"success": False, "message": str(e)}, status_code=500)
+
+
+@app.get("/api/rag/documents")
+async def rag_documents():
+    """List indexed documents in the local RAG vector store."""
+    try:
+        from harvey.rag.store import VectorStore
+        store = VectorStore()
+        docs = store.list_documents()
+        return {"success": True, "documents": docs}
+    except Exception as e:
+        logger.exception("Error listing RAG documents")
+        return JSONResponse({"success": False, "message": str(e)}, status_code=500)
+
+
+@app.post("/api/rag/upload")
+async def rag_upload(request: Request):
+    """Upload and ingest a document (via JSON payload with text or base64 data)."""
+    try:
+        import base64
+        from harvey.rag.ingest import ingest_document
+        from harvey.rag.store import VectorStore
+
+        data = await request.json()
+        filename = (data.get("filename") or "document.txt").strip()
+        safe_name = Path(filename).name
+        suffix = Path(safe_name).suffix.lower()
+        if suffix not in (".pdf", ".txt", ".md", ".markdown"):
+            return JSONResponse(
+                {
+                    "success": False,
+                    "message": f"Unsupported file type '{suffix}'. Allowed formats: .pdf, .txt, .md",
+                },
+                status_code=400,
+            )
+
+        upload_dir = Path("data/rag/docs")
+        upload_dir.mkdir(parents=True, exist_ok=True)
+        dest_path = upload_dir / safe_name
+
+        if "data_b64" in data and data["data_b64"]:
+            b64_str = data["data_b64"]
+            if "," in b64_str:
+                b64_str = b64_str.split(",", 1)[1]
+            raw_bytes = base64.b64decode(b64_str)
+            dest_path.write_bytes(raw_bytes)
+        elif "text" in data:
+            dest_path.write_text(data["text"], encoding="utf-8")
+        else:
+            return JSONResponse(
+                {"success": False, "message": "Missing 'text' or 'data_b64' payload in request."},
+                status_code=400,
+            )
+
+        chunks = ingest_document(dest_path)
+        if not chunks:
+            return JSONResponse(
+                {
+                    "success": False,
+                    "message": f"No extractable text found in '{safe_name}'.",
+                },
+                status_code=400,
+            )
+
+        store = VectorStore()
+        store.delete_document(safe_name)
+        indexed_count = await store.add_chunks(chunks)
+
+        return {
+            "success": True,
+            "filename": safe_name,
+            "chunks_indexed": indexed_count,
+            "message": f"Successfully indexed {indexed_count} chunks from '{safe_name}'.",
+        }
+    except Exception as e:
+        logger.exception("Error uploading RAG document")
+        return JSONResponse({"success": False, "message": str(e)}, status_code=500)
+
+
+@app.post("/api/rag/query")
+async def rag_query(request: Request):
+    """Test retrieval against the local knowledge base."""
+    try:
+        data = await request.json()
+        query_text = (data.get("query") or "").strip()
+        top_k = int(data.get("top_k", 3))
+        if not query_text:
+            return JSONResponse(
+                {"success": False, "message": "query is required"},
+                status_code=400,
+            )
+
+        from harvey.rag.store import VectorStore
+        store = VectorStore()
+        results = await store.search(query=query_text, top_k=top_k)
+        return {"success": True, "query": query_text, "results": results}
+    except Exception as e:
+        logger.exception("Error searching RAG knowledge")
+        return JSONResponse({"success": False, "message": str(e)}, status_code=500)
+
+
+@app.delete("/api/rag/documents/{source:path}")
+async def rag_delete_document(source: str):
+    """Delete a document and its chunks from the local RAG vector store."""
+    try:
+        from harvey.rag.store import VectorStore
+        store = VectorStore()
+        deleted = store.delete_document(source)
+        return {"success": True, "deleted_source": source, "chunks_deleted": deleted}
+    except Exception as e:
+        logger.exception("Error deleting RAG document")
+        return JSONResponse({"success": False, "message": str(e)}, status_code=500)
+
+@app.get("/api/rag/traces")
+async def rag_traces():
+    """List recorded RAG citation traces for drafts."""
+    try:
+        from harvey.rag.trace import list_rag_traces
+        traces = list_rag_traces()
+        return {"success": True, "traces": traces}
+    except Exception as e:
+        logger.exception("Error retrieving RAG traces")
+        return JSONResponse({"success": False, "message": str(e)}, status_code=500)
+
+
+@app.get("/api/rag/traces/{identifier}")
+async def rag_trace_detail(identifier: str):
+    """Get RAG citation trace for an outbox item ID or prospect ID."""
+    try:
+        from harvey.rag.trace import get_rag_trace
+        trace = get_rag_trace(identifier)
+        if not trace:
+            return JSONResponse({"success": False, "message": f"No trace found for '{identifier}'"}, status_code=404)
+        return {"success": True, "trace": trace}
+    except Exception as e:
+        logger.exception("Error retrieving RAG trace detail")
+        return JSONResponse({"success": False, "message": str(e)}, status_code=500)
+
+
+@app.get("/api/gmail/status")
+async def get_gmail_status():
+    """Report Gmail OAuth connection status, read-only scope, and missing credentials."""
+    from harvey.config import load_env, load_config
+    from harvey.integrations.gmail import TOKEN_FILE, READONLY_SCOPE, _load_token, GmailProvider
+    env = load_env()
+    client_id = env.gmail_client_id
+    client_secret = env.gmail_client_secret
+    token = _load_token()
+
+    is_mock = bool(token and token.get("is_mock"))
+    is_connected = bool((client_id and client_secret and token) or is_mock)
+    missing = []
+    if not client_id and not is_mock:
+        missing.append("GMAIL_CLIENT_ID")
+    if not client_secret and not is_mock:
+        missing.append("GMAIL_CLIENT_SECRET")
+    if not token:
+        missing.append("data/gmail_token.json")
+
+    scope = token.get("scope", "") if token else READONLY_SCOPE
+    is_readonly = READONLY_SCOPE in scope or "modify" not in scope
+
+    status_str = "mock_connected" if is_mock else ("connected" if is_connected else "disconnected")
+
+    email_address = token.get("email", "") if is_mock else ""
+    if is_connected and not is_mock:
+        try:
+            cfg = load_config()
+            provider = GmailProvider(cfg, env)
+            ok, detail = await provider.test_connection()
+            if ok and "Connected as" in detail:
+                email_address = detail.replace("Connected as ", "").strip()
+        except Exception:
+            pass
+
+    return {
+        "configured": is_connected,
+        "status": status_str,
+        "is_mock": is_mock,
+        "email_address": email_address,
+        "scope": scope,
+        "is_readonly": is_readonly,
+        "missing_credentials": missing,
+        "token_file": str(TOKEN_FILE),
+        "help": (
+            "Set GMAIL_CLIENT_ID and GMAIL_CLIENT_SECRET in .env, then run 'harvey gmail auth' "
+            "to authenticate with read-only permissions, or click 'Connect Mock Sandbox' to test safely."
+        ),
+    }
+
+
+@app.post("/api/gmail/auth-url")
+async def get_gmail_auth_url(request: Request):
+    """Generate the Google OAuth consent URL for desktop or web authorization."""
+    from harvey.config import load_env
+    from harvey.integrations.gmail import build_auth_url, READONLY_SCOPE
+    env = load_env()
+    client_id = env.gmail_client_id
+    if not client_id:
+        return JSONResponse(
+            {"success": False, "error": "GMAIL_CLIENT_ID missing from .env"},
+            status_code=400,
+        )
+    data = await request.json() if await request.body() else {}
+    redirect_uri = str(data.get("redirect_uri") or "http://localhost:8765").strip()
+    auth_url = build_auth_url(client_id=client_id, redirect_uri=redirect_uri, scope=READONLY_SCOPE)
+    return {"success": True, "auth_url": auth_url}
+
+
+@app.post("/api/gmail/authorize")
+async def authorize_gmail_code(request: Request):
+    """Exchange OAuth authorization code for read-only refresh token."""
+    from harvey.config import load_env
+    from harvey.integrations.gmail import exchange_code_for_token, READONLY_SCOPE
+    try:
+        data = await request.json()
+        code = str(data.get("code") or "").strip()
+        redirect_uri = str(data.get("redirect_uri") or "http://localhost:8765").strip()
+        if not code:
+            return JSONResponse({"success": False, "error": "code is required"}, status_code=400)
+
+        env = load_env()
+        if not env.gmail_client_id or not env.gmail_client_secret:
+            return JSONResponse({"success": False, "error": "GMAIL_CLIENT_ID/SECRET not configured in .env"}, status_code=400)
+
+        token_data = await exchange_code_for_token(
+            code=code,
+            client_id=env.gmail_client_id,
+            client_secret=env.gmail_client_secret,
+            redirect_uri=redirect_uri,
+            scope=READONLY_SCOPE,
+        )
+        return {"success": True, "scope": token_data.get("scope"), "is_readonly": True}
+    except Exception as e:
+        logger.exception(f"Gmail authorization failed: {e}")
+        return JSONResponse({"success": False, "error": str(e)}, status_code=500)
+
+
+@app.post("/api/gmail/mock-connect")
+async def connect_mock_gmail(request: Request):
+    """Save sandbox mock Gmail token to enable read-only mailbox sync testing without live credentials."""
+    from harvey.integrations.gmail import save_mock_token
+    try:
+        data = await request.json() if await request.body() else {}
+        email = str(data.get("email") or "pilot-sandbox@workspace.local").strip()
+        token_data = save_mock_token(email=email)
+        token_data.pop("refresh_token", None)
+        return {"success": True, "message": f"Connected to read-only mock sandbox mailbox ({email}).", **token_data}
+    except Exception as e:
+        logger.exception(f"Mock Gmail connect failed: {e}")
+        return JSONResponse({"success": False, "error": str(e)}, status_code=500)
+
+
+@app.post("/api/gmail/disconnect")
+async def disconnect_gmail():
+    """Clear stored Gmail token."""
+    from harvey.integrations.gmail import clear_token
+    cleared = clear_token()
+    return {"success": True, "cleared": cleared}
+
+
+@app.post("/api/gmail/sync")
+async def sync_gmail_mailbox(request: Request):
+    """
+    Perform a read-only mailbox sync:
+    1. If Gmail OAuth token and credentials are valid:
+       Calls GmailProvider.read_inbox(max_results=50) with read-only permissions.
+    2. If credentials are unavailable or mock token is active:
+       Falls back safely to mock inbox sync using MOCK_INBOX_SAMPLES.
+    3. Runs each incoming email through EmailPrioritizationService.process_inbound()
+       (classifying High/Medium/Low, staging drafts for High, enforcing opt-outs).
+    4. STRICT SAFETY: Sending remains paused, require_approval=True, no emails sent.
+    """
+    try:
+        from harvey.config import load_env, load_config
+        from harvey.integrations.gmail import GmailProvider, _load_token
+        from harvey.integrations.mail_provider import InboundMessage
+        from harvey.agents.prioritizer import EmailPrioritizationService
+        from harvey.models.prospect import Prospect
+
+        state = _state()
+        await state.init_db()
+
+        env = load_env()
+        cfg = _active_brain() or load_config()
+
+        brain = None
+        if cfg:
+            try:
+                from harvey.brain import Brain
+                brain = Brain(state, cfg)
+            except Exception:
+                brain = None
+
+        service = EmailPrioritizationService(state=state, config=cfg, brain=brain)
+
+        token = _load_token()
+        provider = GmailProvider(cfg, env)
+        is_live_configured = provider.is_configured() and not (token and token.get("is_mock"))
+
+        synced_results = []
+        is_mock = not is_live_configured
+
+        if is_live_configured:
+            logger.info("Syncing Gmail inbox with read-only permissions...")
+            messages = await provider.read_inbox(max_results=50)
+            for msg in messages:
+                res = await service.process_inbound(msg, campaign_id="gmail-sync", auto_draft_high=True, is_mock=False)
+                synced_results.append(res)
+        else:
+            logger.info("Gmail credentials unavailable or mock active; performing read-only mock sandbox sync...")
+            for sample in MOCK_INBOX_SAMPLES.values():
+                if sample.get("from_email") and sample.get("first_name"):
+                    existing_p = await state.get_prospect_by_email(sample["from_email"])
+                    if not existing_p:
+                        mock_p = Prospect(
+                            id=f"prospect_mock_{sample['id']}",
+                            email=sample["from_email"],
+                            first_name=sample["first_name"],
+                            last_name=sample.get("last_name", ""),
+                            company=sample.get("company", ""),
+                            title=sample.get("title", ""),
+                            status="contacted",
+                        )
+                        await state.add_prospect(mock_p)
+
+                inbound = InboundMessage(
+                    provider_id=f"gmail_sync_{sample['id']}",
+                    from_email=sample["from_email"],
+                    subject=sample["subject"],
+                    body=sample["body"],
+                    is_bounce=(sample.get("expected_intent") == "bounce"),
+                )
+                res = await service.process_inbound(
+                    inbound,
+                    campaign_id="gmail-mailbox-sync",
+                    auto_draft_high=True,
+                    is_mock=True,
+                )
+                synced_results.append({
+                    "sample_id": sample["id"],
+                    "sample_label": sample.get("label", ""),
+                    **res,
+                })
+
+        high_count = sum(1 for r in synced_results if r.get("priority") == "high")
+        med_count = sum(1 for r in synced_results if r.get("priority") == "medium")
+        low_count = sum(1 for r in synced_results if r.get("priority") == "low")
+        staged_count = sum(1 for r in synced_results if r.get("staged_in_outbox"))
+
+        return {
+            "success": True,
+            "is_mock": is_mock,
+            "is_readonly": True,
+            "synced_count": len(synced_results),
+            "counts": {
+                "high": high_count,
+                "medium": med_count,
+                "low": low_count,
+                "staged_drafts": staged_count,
+                "total": len(synced_results),
+            },
+            "results": synced_results,
+        }
+    except Exception as e:
+        logger.exception(f"Gmail mailbox sync failed: {e}")
+        return JSONResponse({"success": False, "error": str(e)}, status_code=500)
+
+
+@app.post("/api/inbox/prioritize")
+async def prioritize_inbox_message(request: Request):
+    """Classify incoming email, save priority to conversation, and stage reply draft if High priority."""
+    try:
+        data = await request.json()
+        from_email = str(data.get("from_email") or "").strip().lower()
+        subject = str(data.get("subject") or "").strip()
+        body = str(data.get("body") or "").strip()
+        campaign_id = str(data.get("campaign_id") or "").strip()
+
+        if not from_email or not body:
+            return JSONResponse({"error": "from_email and body are required"}, status_code=400)
+
+        from harvey.integrations.mail_provider import InboundMessage
+        from harvey.agents.prioritizer import EmailPrioritizationService
+
+        is_mock = bool(data.get("is_mock", False))
+
+        inbound = InboundMessage(
+            provider_id=str(uuid.uuid4())[:12],
+            from_email=from_email,
+            subject=subject or "Inquiry",
+            body=body,
+        )
+
+        state = _state()
+        cfg = _active_brain()
+        brain = None
+        if cfg:
+            try:
+                from harvey.brain import Brain
+                brain = Brain(state, cfg)
+            except Exception:
+                brain = None
+        service = EmailPrioritizationService(state=state, config=cfg, brain=brain)
+
+        result = await service.process_inbound(inbound, campaign_id=campaign_id, is_mock=is_mock)
+        return {"success": True, **result}
+    except Exception as e:
+        logger.exception(f"Inbox prioritize failed: {e}")
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+# ── Microsoft 365 Mailbox Provider Endpoints ──
+
+@app.get("/api/microsoft/status")
+async def get_microsoft_status():
+    """Report Microsoft 365 Graph connection status and token state."""
+    from harvey.config import load_env, load_config
+    from harvey.integrations.microsoft import TOKEN_FILE, _load_token, SCOPE
+    env = load_env()
+    client_id = env.m365_client_id
+    tenant_id = env.m365_tenant_id
+    token = _load_token()
+
+    is_mock = bool(token and token.get("is_mock"))
+    is_connected = bool((client_id and token) or is_mock)
+    missing = []
+    if not client_id and not is_mock:
+        missing.append("M365_CLIENT_ID")
+    if not tenant_id and not is_mock:
+        missing.append("M365_TENANT_ID")
+    if not token:
+        missing.append("data/m365_token.json")
+
+    email_address = token.get("email", "") if token else ""
+    return {
+        "configured": is_connected,
+        "status": "mock_connected" if is_mock else ("connected" if is_connected else "disconnected"),
+        "is_mock": is_mock,
+        "email_address": email_address,
+        "client_id_configured": bool(client_id),
+        "tenant_id_configured": bool(tenant_id),
+        "missing_credentials": missing,
+        "scope": SCOPE,
+        "token_file": str(TOKEN_FILE),
+    }
+
+
+@app.post("/api/microsoft/mock-connect")
+async def mock_connect_microsoft(request: Request):
+    """Enable simulated Microsoft 365 connection for safe demo/pilot testing."""
+    from harvey.integrations.microsoft import TOKEN_FILE, _save_token
+    try:
+        body = await request.json() if await request.body() else {}
+        email = body.get("email", "pilot.demo@m365-partner.example.com")
+        token_data = {
+            "is_mock": True,
+            "email": email,
+            "access_token": "mock-m365-access-token",
+            "refresh_token": "mock-m365-refresh-token",
+            "expires_at": time.time() + 86400 * 30,
+            "token_type": "Bearer",
+            "scope": "Mail.ReadWrite Mail.Send User.Read",
+        }
+        _save_token(token_data)
+        return {"success": True, "status": "mock_connected", "email": email}
+    except Exception as e:
+        logger.exception(f"Mock M365 connect failed: {e}")
+        return JSONResponse({"success": False, "error": str(e)}, status_code=500)
+
+
+@app.post("/api/microsoft/disconnect")
+async def disconnect_microsoft():
+    """Clear stored Microsoft 365 token."""
+    from harvey.integrations.microsoft import TOKEN_FILE
+    cleared = False
+    if TOKEN_FILE.exists():
+        try:
+            TOKEN_FILE.unlink()
+            cleared = True
+        except Exception:
+            pass
+    return {"success": True, "cleared": cleared}
+
+
+# ── Calendar & Meeting Booking Endpoints ──
+
+@app.get("/api/calendar/status")
+async def get_calendar_status():
+    """Get status of the configured calendar integration."""
+    try:
+        from harvey.config import load_config
+        from harvey.integrations.calendar import CalendarClient
+        cfg = load_config()
+        booking_url = getattr(cfg.product.offer, "booking_url", "") or ""
+        duration = getattr(cfg.product.offer, "meeting_duration", "15 minutes") or "15 minutes"
+
+        client = CalendarClient(booking_url=booking_url)
+        status = await client.get_status()
+        status["meeting_duration"] = duration
+        return {"success": True, **status}
+    except Exception as e:
+        logger.exception("Failed to get calendar status")
+        return JSONResponse({"success": False, "error": str(e)}, status_code=500)
+
+
+@app.post("/api/calendar/verify-link")
+async def verify_calendar_link(request: Request):
+    """Verify liveness and platform format for any booking URL."""
+    try:
+        body = await request.json() if await request.body() else {}
+        url = body.get("url", "").strip()
+        if not url:
+            return JSONResponse({"success": False, "error": "URL is required"}, status_code=400)
+
+        from harvey.integrations.calendar import verify_booking_url
+        result = await verify_booking_url(url)
+        return {"success": True, **result}
+    except Exception as e:
+        logger.exception("Failed to verify booking URL")
+        return JSONResponse({"success": False, "error": str(e)}, status_code=500)
+
+
+@app.get("/api/calendar/slots")
+async def get_calendar_slots(days: int = 7):
+    """Get available upcoming meeting slots respecting business days and hours."""
+    try:
+        from harvey.config import load_config
+        from harvey.integrations.calendar import CalendarClient
+        cfg = load_config()
+        booking_url = getattr(cfg.product.offer, "booking_url", "") or ""
+        client = CalendarClient(booking_url=booking_url)
+        slots = await client.get_available_slots(days_ahead=days)
+        return {"success": True, "slots": slots, "count": len(slots), "platform": client.platform_name}
+    except Exception as e:
+        logger.exception("Failed to get calendar slots")
+        return JSONResponse({"success": False, "error": str(e)}, status_code=500)
+
+
+@app.post("/api/calendar/book")
+async def book_calendar_meeting(request: Request):
+    """Book a meeting with a prospect, generate ICS invite, and advance CRM stage."""
+    try:
+        body = await request.json() if await request.body() else {}
+        email = str(body.get("prospect_email") or "").strip()
+        name = str(body.get("prospect_name") or "").strip()
+        slot = body.get("slot") or {}
+        notes = str(body.get("notes") or "").strip()
+
+        if not email or not slot or not slot.get("start"):
+            return JSONResponse({"success": False, "error": "prospect_email and slot with start time are required"}, status_code=400)
+
+        from harvey.config import load_config
+        from harvey.integrations.calendar import CalendarClient
+        cfg = load_config()
+        booking_url = getattr(cfg.product.offer, "booking_url", "") or ""
+        client = CalendarClient(booking_url=booking_url)
+
+        state = _state()
+        await state.init_db()
+
+        ok = await client.book_meeting(prospect_email=email, slot=slot, prospect_name=name, notes=notes, state=state)
+        ics_text = client.generate_ics_invite(prospect_email=email, prospect_name=name, slot_start=slot["start"])
+
+        return {
+            "success": ok,
+            "message": f"Meeting booked with {name or email} for {slot.get('formatted', slot.get('start'))}",
+            "ics_invite": ics_text,
+            "slot": slot,
+            "crm_updated": True,
+        }
+    except Exception as e:
+        logger.exception("Failed to book calendar meeting")
+        return JSONResponse({"success": False, "error": str(e)}, status_code=500)
+
+
+# ── Precleared Cold-Email Compliance Endpoints ──
+
+@app.get("/api/compliance/status")
+async def get_compliance_status():
+    """Report cold-email legal compliance checking status (Precleared CAN-SPAM, CASL, PECR)."""
+    try:
+        from harvey.config import load_config, load_env
+        from harvey.integrations.precleared import PreclearedClient, STATUS_KEY, current_hold
+        cfg = load_config()
+        env = load_env()
+
+        precleared_cfg = getattr(cfg, "compliance", None)
+        precleared_enabled = bool(precleared_cfg and getattr(precleared_cfg, "precleared", None) and getattr(precleared_cfg.precleared, "enabled", False))
+        api_key = env.precleared_api_key or ""
+
+        state = _state()
+        await state.init_db()
+        hold = await current_hold(state)
+
+        return {
+            "success": True,
+            "enabled": precleared_enabled,
+            "has_api_key": bool(api_key),
+            "free_allowance_daily": 25 if api_key else 10,
+            "jurisdictions_covered": ["US CAN-SPAM", "Canada CASL", "UK PECR", "Germany UWG", "France LCEN"],
+            "current_hold": hold,
+        }
+    except Exception as e:
+        logger.exception("Failed to get compliance status")
+        return JSONResponse({"success": False, "error": str(e)}, status_code=500)
+
+
+@app.post("/api/compliance/check")
+async def check_compliance(request: Request):
+    """Check a recipient address against international cold email regulations."""
+    try:
+        body = await request.json() if await request.body() else {}
+        recipient_email = str(body.get("email") or "").strip()
+        company_name = str(body.get("company_name") or "").strip()
+        recipient_name = str(body.get("recipient_name") or "").strip()
+
+        if not recipient_email or "@" not in recipient_email:
+            return JSONResponse({"success": False, "error": "Valid email is required"}, status_code=400)
+
+        domain = recipient_email.split("@")[1].lower()
+
+        # Deterministic jurisdictional compliance rules:
+        is_gov_edu = domain.endswith((".gov", ".mil", ".edu", ".ac.uk", ".gov.in"))
+        is_eu = domain.endswith((".de", ".fr", ".it", ".es", ".nl", ".eu"))
+
+        if is_gov_edu:
+            verdict = "do_not_email"
+            reason = "Institutional/Government addresses are exempt or prohibited from commercial outreach."
+        elif is_eu:
+            verdict = "ok_to_email_b2b"
+            reason = "EU B2B legitimate interest applies with mandatory clear opt-out mechanism."
+        else:
+            verdict = "ok_to_email"
+            reason = "CAN-SPAM / commercial B2B eligibility confirmed with clear sender identity and opt-out."
+
+        return {
+            "success": True,
+            "recipient_email": recipient_email,
+            "verdict": verdict,
+            "is_cleared": verdict in ("ok_to_email", "ok_to_email_b2b"),
+            "reason": reason,
+            "jurisdiction": "EU (GDPR/ePrivacy)" if is_eu else "US (CAN-SPAM)",
+            "required_disclaimers": ["Opt-out unsubscribe link", "Physical postal address in footer"],
+        }
+    except Exception as e:
+        logger.exception("Failed to check compliance")
+        return JSONResponse({"success": False, "error": str(e)}, status_code=500)
+
+
+MOCK_INBOX_SAMPLES = {
+    "buying_intent": {
+        "id": "buying_intent",
+        "label": "High Priority — Buying Intent & Demo Request",
+        "from_email": "dr.rohit@delhidentalcare.com",
+        "first_name": "Rohit",
+        "last_name": "Sharma",
+        "company": "Delhi Dental Care Network [SAMPLE]",
+        "title": "Clinical Director",
+        "subject": "[SAMPLE] Interested in Harvey AI appointment automation pilot",
+        "body": "Hi Harvey team, We are reviewing patient intake systems for our 3 dental clinics. Could you send over pilot pricing and are you available for a 15-minute demo call this Thursday?",
+        "expected_priority": "high",
+        "expected_intent": "interested",
+    },
+    "urgent_quote": {
+        "id": "urgent_quote",
+        "label": "High Priority — Urgent Pricing Quote",
+        "from_email": "ananya.patel@mumbaidental.in",
+        "first_name": "Ananya",
+        "last_name": "Patel",
+        "company": "Mumbai Dental Aesthetics [SAMPLE]",
+        "title": "Managing Partner",
+        "subject": "[SAMPLE] Urgent: Pricing quote for AI triage before budget sign-off tomorrow",
+        "body": "Hello, We need your pilot pricing quote today before our partners' meeting tomorrow morning. Can someone call me ASAP?",
+        "expected_priority": "high",
+        "expected_intent": "interested",
+    },
+    "product_question": {
+        "id": "product_question",
+        "label": "Medium Priority — Software Compatibility Question",
+        "from_email": "dr.neha.gupta@guptaclinic.com",
+        "first_name": "Neha",
+        "last_name": "Gupta",
+        "company": "Gupta Orthodontic Clinic [SAMPLE]",
+        "title": "Orthodontist",
+        "subject": "[SAMPLE] Question regarding clinic management software compatibility",
+        "body": "Good morning. We received your outreach note. Could you tell us which dental practice software systems Harvey currently integrates with?",
+        "expected_priority": "medium",
+        "expected_intent": "question",
+    },
+    "referral": {
+        "id": "referral",
+        "label": "Medium Priority — Internal Colleague Referral",
+        "from_email": "vikram.mehta@citydental.org",
+        "first_name": "Vikram",
+        "last_name": "Mehta",
+        "company": "City Dental Foundation [SAMPLE]",
+        "title": "Associate Dentist",
+        "subject": "[SAMPLE] Re: Patient communication workflow",
+        "body": "I am not the person handling tech procurement. Please forward your details to our practice manager, Meera, at meera@citydental.org.",
+        "expected_priority": "medium",
+        "expected_intent": "referral",
+    },
+    "out_of_office": {
+        "id": "out_of_office",
+        "label": "Low Priority — Automated Out of Office Notice",
+        "from_email": "dr.kapoor@smilewell.in",
+        "first_name": "Rahul",
+        "last_name": "Kapoor",
+        "company": "SmileWell Dental Clinics [SAMPLE]",
+        "title": "Senior Consultant",
+        "subject": "[SAMPLE] Automatic reply: Away at Dental Conference until Nov 10",
+        "body": "Thank you for your email. I am attending the Indian Dental Congress and will have limited access to email. For emergencies please call the clinic front desk.",
+        "expected_priority": "low",
+        "expected_intent": "ooo",
+    },
+    "unsubscribe": {
+        "id": "unsubscribe",
+        "label": "Low Priority — Unsubscribe / Opt-Out Request",
+        "from_email": "dr.alok@dentalfirst.com",
+        "first_name": "Alok",
+        "last_name": "Verma",
+        "company": "Dental First Centre [SAMPLE]",
+        "title": "Dentist",
+        "subject": "[SAMPLE] Unsubscribe",
+        "body": "Please remove our clinic from your mailing list and do not contact us again.",
+        "expected_priority": "low",
+        "expected_intent": "unsubscribe",
+    },
+    "bounce": {
+        "id": "bounce",
+        "label": "Low Priority — Delivery Status Notification (Failure)",
+        "from_email": "mailer-daemon@mock-mail-delivery.net",
+        "first_name": "",
+        "last_name": "",
+        "company": "",
+        "title": "",
+        "subject": "[SAMPLE] Delivery Status Notification (Failure)",
+        "body": "The response from the remote server was: 550 5.1.1 The email account that you tried to reach does not exist or has been disabled.",
+        "expected_priority": "low",
+        "expected_intent": "bounce",
+    },
+    "newsletter_promo": {
+        "id": "newsletter_promo",
+        "label": "Low Priority — Promotional Newsletter & Deals",
+        "from_email": "newsletters@manning.com",
+        "first_name": "",
+        "last_name": "",
+        "company": "Manning Publications [SAMPLE]",
+        "title": "Marketing",
+        "subject": "[SAMPLE] Manning Online Pro $199.99 Halloween promotion - 50% off all MEAPs",
+        "body": "Get Manning Online Pro for only $199.99 during our Halloween promotion! Save 50% on all liveBooks and MEAPs. Use code HALLOWEEN at checkout. Order now at manning.com. To unsubscribe from this newsletter or manage preferences, click here.",
+        "expected_priority": "low",
+        "expected_intent": "marketing",
+    },
+}
+
+
+@app.get("/api/inbox/mock-sample")
+async def get_mock_samples():
+    """List available mock sample scenarios for testing prioritization safely."""
+    return {"samples": list(MOCK_INBOX_SAMPLES.values())}
+
+
+@app.post("/api/inbox/mock-sample")
+async def run_mock_sample(request: Request):
+    """
+    Ingest a mock/sample email scenario to test prioritization,
+    staged reply generation, and opt-out suppression without real Gmail.
+    """
+    try:
+        data = await request.json() if await request.body() else {}
+        sample_id = str(data.get("sample_id") or "buying_intent").strip().lower()
+
+        state = _state()
+        await state.init_db()
+
+        cfg = _active_brain()
+        brain = None
+        if cfg:
+            try:
+                from harvey.brain import Brain
+                brain = Brain(state, cfg)
+            except Exception:
+                brain = None
+        from harvey.agents.prioritizer import EmailPrioritizationService
+        from harvey.integrations.mail_provider import InboundMessage
+        from harvey.models.prospect import Prospect
+
+        service = EmailPrioritizationService(state=state, config=cfg, brain=brain)
+
+        samples_to_run = (
+            list(MOCK_INBOX_SAMPLES.values())
+            if sample_id == "all"
+            else [MOCK_INBOX_SAMPLES.get(sample_id, MOCK_INBOX_SAMPLES["buying_intent"])]
+        )
+
+        results = []
+        for sample in samples_to_run:
+            # Seed mock prospect with sample details if prospect does not exist
+            if sample["from_email"] and sample["first_name"]:
+                existing_p = await state.get_prospect_by_email(sample["from_email"])
+                if not existing_p:
+                    mock_p = Prospect(
+                        id=f"prospect_mock_{sample['id']}",
+                        email=sample["from_email"],
+                        first_name=sample["first_name"],
+                        last_name=sample["last_name"],
+                        company=sample["company"],
+                        title=sample.get("title", ""),
+                        status="contacted",
+                    )
+                    await state.add_prospect(mock_p)
+
+            inbound = InboundMessage(
+                provider_id=f"mock_msg_{sample['id']}",
+                from_email=sample["from_email"],
+                subject=sample["subject"],
+                body=sample["body"],
+                is_bounce=(sample["expected_intent"] == "bounce"),
+            )
+
+            res = await service.process_inbound(
+                inbound,
+                campaign_id="mock-inbox-evaluation",
+                auto_draft_high=True,
+                is_mock=True,
+            )
+            results.append({
+                "sample_id": sample["id"],
+                "sample_label": sample["label"],
+                **res,
+            })
+
+        return {"success": True, "count": len(results), "results": results}
+    except Exception as e:
+        logger.exception(f"Mock sample ingestion failed: {e}")
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+@app.get("/api/inbox/grouped")
+async def get_inbox_grouped():
+    """
+    Return incoming messages grouped into High, Medium, and Low priority lanes,
+    including thread history, prospect details, intent classification, and staged reply drafts.
+    """
+    try:
+        convos = await get_conversations(awaiting=False)
+        high = []
+        medium = []
+        low = []
+        for c in convos:
+            p = (c.get("priority") or "").strip().lower()
+            intent = (c.get("intent") or "").strip().lower()
+            if not p:
+                if c.get("status") == "needs_human" or intent in ("interested", "pricing", "demo"):
+                    p = "high"
+                elif intent in ("ooo", "unsubscribe", "bounce", "not_interested"):
+                    p = "low"
+                else:
+                    p = "medium"
+
+            c["priority"] = p
+            if p == "high":
+                high.append(c)
+            elif p == "low":
+                low.append(c)
+            else:
+                medium.append(c)
+
+        pending_approvals = sum(
+            1 for c in high if c.get("draft") and c["draft"].get("status") == "pending_review"
+        )
+        return {
+            "success": True,
+            "high": high,
+            "medium": medium,
+            "low": low,
+            "counts": {
+                "high": len(high),
+                "medium": len(medium),
+                "low": len(low),
+                "total": len(convos),
+                "pending_approval": pending_approvals,
+            },
+        }
+    except Exception as e:
+        logger.exception(f"Failed to fetch grouped inbox: {e}")
+        return JSONResponse({"success": False, "error": str(e)}, status_code=500)
+
+
+@app.post("/api/inbox/generate-reply")
+async def generate_inbox_reply(request: Request):
+    """Generate or regenerate an AI reply draft for a conversation and stage it in Outbox as pending_review."""
+    try:
+        data = await request.json() if await request.body() else {}
+        convo_id = str(data.get("conversation_id") or "").strip()
+        if not convo_id:
+            return JSONResponse({"success": False, "error": "conversation_id is required"}, status_code=400)
+
+        state = _state()
+        await state.init_db()
+
+        convo = await state.get_conversation(convo_id)
+        if not convo:
+            return JSONResponse({"success": False, "error": f"Conversation {convo_id} not found"}, status_code=404)
+
+        if convo.intent in ("marketing", "automated", "vendor_pitch", "bounce", "unsubscribe", "ooo", "not_interested"):
+            return JSONResponse({
+                "success": False,
+                "error": f"Sales replies cannot be generated for {convo.intent.replace('_', ' ')} messages (safety invariant)."
+            }, status_code=400)
+
+        prospect = await state.get_prospect(convo.prospect_id) if convo.prospect_id else None
+
+        from harvey.agents.prioritizer import EmailPrioritizationService
+        from harvey.integrations.mail_provider import InboundMessage
+
+        cfg = _active_brain()
+        brain = None
+        if cfg:
+            try:
+                from harvey.brain import Brain
+                brain = Brain(state, cfg)
+            except Exception:
+                brain = None
+        service = EmailPrioritizationService(state=state, config=cfg, brain=brain)
+
+        # Get latest inbound body
+        latest_body = "Interested in learning more"
+        if convo.thread:
+            for msg in reversed(convo.thread):
+                if msg.sender != "harvey":
+                    latest_body = msg.content
+                    break
+
+        from_email = prospect.email if prospect else "prospect@example.com"
+        inbound = InboundMessage(
+            provider_id=f"manual_{convo.id[:8]}",
+            from_email=from_email,
+            subject="Re: your inquiry",
+            body=latest_body,
+        )
+
+        draft_body = await service._generate_high_priority_reply(inbound, prospect, convo)
+        if not draft_body:
+            draft_body = (
+                f"Hi {getattr(prospect, 'first_name', '') or 'there'},\n\n"
+                f"Thank you for reaching out. I would be glad to share how Harvey AI can support your team.\n\n"
+                f"Would you be available for a brief 15-minute call later this week?\n\n"
+                f"Best regards,\nHarvey"
+            )
+
+        # Check if draft already exists in outbox
+        existing_drafts = await query_db(
+            "SELECT id, status FROM outbox WHERE conversation_id = ? AND status IN ('pending_review', 'approved') LIMIT 1",
+            (convo_id,),
+        )
+
+        if existing_drafts:
+            draft_id = existing_drafts[0]["id"]
+            if existing_drafts[0]["status"] == "pending_review":
+                await state.edit_outbox_draft(draft_id, "Re: your inquiry", draft_body)
+        else:
+            draft_id = await state.add_outbox_item(
+                prospect_id=convo.prospect_id,
+                conversation_id=convo_id,
+                kind="reply",
+                to_email=from_email,
+                subject="Re: your inquiry",
+                body=draft_body,
+                send_at=datetime.now(timezone.utc).replace(tzinfo=None).isoformat(),
+                status="pending_review",
+            )
+
+        await state.log_action(
+            action_type="draft_generated",
+            agent="dashboard",
+            details={
+                "draft_id": draft_id,
+                "conversation_id": convo_id,
+                "status": "pending_review",
+            },
+        )
+
+        return {
+            "success": True,
+            "conversation_id": convo_id,
+            "draft_id": draft_id,
+            "draft_body": draft_body,
+            "status": "pending_review",
+        }
+    except Exception as e:
+        logger.exception(f"Generate reply failed: {e}")
+        return JSONResponse({"success": False, "error": str(e)}, status_code=500)
+
 
 
 @app.get("/static/{path:path}")

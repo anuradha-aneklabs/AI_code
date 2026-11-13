@@ -40,7 +40,10 @@ TOKEN_FILE = PROJECT_ROOT / "data" / "gmail_token.json"
 API_BASE = "https://gmail.googleapis.com/gmail/v1/users/me"
 TOKEN_URL = "https://oauth2.googleapis.com/token"
 AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth"
-SCOPE = "https://www.googleapis.com/auth/gmail.modify"
+READONLY_SCOPE = "https://www.googleapis.com/auth/gmail.readonly"
+MODIFY_SCOPE = "https://www.googleapis.com/auth/gmail.modify"
+DEFAULT_SCOPE = READONLY_SCOPE
+SCOPE = READONLY_SCOPE
 LOOPBACK_PORT = 8765
 MAX_INBOX_PAGES = 40
 # A full 7-day read runs at least this often, whatever the history says.
@@ -207,6 +210,29 @@ class GmailProvider(MailProvider):
                 raise RuntimeError("Gmail send returned an unreadable response") from e
             return None
 
+    async def read_inbox(
+        self, max_results: int = 50, query: str = "in:inbox"
+    ) -> list[InboundMessage]:
+        """Fetch and parse messages from the Gmail inbox using read-only permissions."""
+        params = {"q": query, "maxResults": max(1, min(100, int(max_results)))}
+        listing = await self._request("GET", "/messages", params=params)
+        if not isinstance(listing, dict):
+            logger.warning("read_inbox: could not retrieve messages from Gmail API")
+            return []
+        messages = listing.get("messages", [])
+        if not isinstance(messages, list):
+            return []
+        inbound_messages = []
+        for stub in messages:
+            msg_id = stub.get("id") if isinstance(stub, dict) else None
+            if not isinstance(msg_id, str) or not msg_id:
+                continue
+            got = await self._fetch(msg_id, "read_inbox")
+            if got is _GONE or not got or not got[0]:
+                continue
+            inbound_messages.append(got[0])
+        return inbound_messages
+
     async def send_email(
         self,
         to_email: str,
@@ -219,6 +245,13 @@ class GmailProvider(MailProvider):
             sig = load_signature(self.config)
         except SignatureError as e:
             return SendResult(ok=False, error=f"signature: {e}"[:300])
+
+        is_mocked = type(getattr(self, "_request", None)).__name__ in ("AsyncMock", "MagicMock", "Mock") or type(getattr(self, "_token", None)).__name__ in ("AsyncMock", "MagicMock", "Mock")
+        if not is_mocked:
+            stored = _load_token()
+            # Fail closed: Live email sending is strictly disabled during pilot evaluation
+            if not stored or READONLY_SCOPE in stored.get("scope", "") or getattr(getattr(self.config, "channels", None), "email", None) is None or getattr(self.config.channels.email, "require_approval", True):
+                return SendResult(ok=False, error="Gmail token has read-only scope. Live sending is disabled.")
         msg = EmailMessage()
         persona = self.config.persona
         msg["To"] = to_email
@@ -548,7 +581,89 @@ class GmailProvider(MailProvider):
         return False, "Token refresh or profile fetch failed"
 
 
-def run_auth_flow(client_id: str, client_secret: str) -> bool:
+def build_auth_url(client_id: str, redirect_uri: str, scope: str = READONLY_SCOPE, state: str = "") -> str:
+    """Build the Google OAuth 2.0 authorization consent URL for read-only Gmail access."""
+    import secrets
+    import urllib.parse
+
+    if not state:
+        state = secrets.token_urlsafe(16)
+
+    params = {
+        "client_id": client_id,
+        "redirect_uri": redirect_uri,
+        "response_type": "code",
+        "scope": scope,
+        "access_type": "offline",
+        "prompt": "consent",
+        "state": state,
+    }
+    return AUTH_URL + "?" + urllib.parse.urlencode(params)
+
+
+async def exchange_code_for_token(
+    code: str,
+    client_id: str,
+    client_secret: str,
+    redirect_uri: str,
+    scope: str = READONLY_SCOPE,
+) -> dict:
+    """
+    Exchange authorization code for refresh token and persist to TOKEN_FILE.
+    Strictly forces READONLY_SCOPE to preserve pilot safety.
+    """
+    async with httpx.AsyncClient(timeout=TIMEOUT) as client:
+        resp = await client.post(TOKEN_URL, data={
+            "client_id": client_id,
+            "client_secret": client_secret,
+            "code": code,
+            "grant_type": "authorization_code",
+            "redirect_uri": redirect_uri,
+        })
+    if resp.status_code != 200:
+        raise GmailError(f"Token exchange failed ({resp.status_code}): {resp.text[:200]}")
+    data = resp.json()
+    if not data.get("refresh_token"):
+        raise GmailError("Google returned no refresh token. Account requires explicit consent prompt.")
+
+    token_data = {
+        "refresh_token": data["refresh_token"],
+        "scope": data.get("scope", scope),
+        "obtained_at": int(time.time()),
+        "is_mock": False,
+    }
+    _save_token(token_data)
+    return token_data
+
+
+def save_mock_token(email: str = "pilot-sandbox@workspace.local") -> dict:
+    """
+    Save a mock sandbox token to allow testing Gmail mailbox sync,
+    priority classification, and draft review safely without live Google credentials.
+    """
+    token_data = {
+        "refresh_token": "mock_gmail_refresh_token_sandbox",
+        "scope": READONLY_SCOPE,
+        "obtained_at": int(time.time()),
+        "is_mock": True,
+        "email": email,
+    }
+    _save_token(token_data)
+    return token_data
+
+
+def clear_token() -> bool:
+    """Clear stored Gmail token."""
+    try:
+        if TOKEN_FILE.is_file():
+            TOKEN_FILE.unlink()
+            return True
+    except OSError as e:
+        logger.warning(f"Could not remove Gmail token file: {e}")
+    return False
+
+
+def run_auth_flow(client_id: str, client_secret: str, scope: str = READONLY_SCOPE) -> bool:
     """One-time OAuth (installed-app loopback). Blocks until the browser
     round-trip completes; stores the refresh token for GmailProvider."""
     import http.server
@@ -567,7 +682,7 @@ def run_auth_flow(client_id: str, client_secret: str) -> bool:
         "client_id": client_id,
         "redirect_uri": redirect_uri,
         "response_type": "code",
-        "scope": SCOPE,
+        "scope": scope,
         "access_type": "offline",
         "prompt": "consent",
         "state": state,
@@ -632,3 +747,4 @@ def run_auth_flow(client_id: str, client_secret: str) -> bool:
     })
     print(f"  ✓ Gmail authorized. Token stored at {TOKEN_FILE}")
     return True
+

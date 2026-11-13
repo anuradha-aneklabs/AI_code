@@ -11,7 +11,7 @@ import yaml
 from harvey.textio import read_user_text
 from dotenv import load_dotenv
 from pydantic import (
-    BaseModel, PrivateAttr, TypeAdapter, ValidationError, field_validator, model_validator,
+    BaseModel, Field, PrivateAttr, TypeAdapter, ValidationError, field_validator, model_validator,
 )
 
 from harvey.paths import PROJECT_ROOT
@@ -603,7 +603,7 @@ class UsageConfig(BaseModel):
         return v
 
 
-BRAIN_PROVIDERS = ("claude", "codex")
+BRAIN_PROVIDERS = ("ollama", "gemini", "groq", "openrouter", "xai", "claude", "codex")
 CODEX_REASONING_EFFORTS = ("minimal", "low", "medium", "high", "xhigh")
 
 # Model names are passed to a CLI, so they must look like a model name and
@@ -612,17 +612,19 @@ _MODEL_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/\[\]-]{0,127}$")
 
 
 class BrainConfig(BaseModel):
-    """Which subscription Harvey thinks with.
+    """Which provider Harvey thinks with.
 
-    ``claude`` (default) runs Claude Code headless on your Claude plan.
-    ``codex`` runs Codex on your ChatGPT plan. There is never an automatic
-    fallback between them, and an explicit ``model`` only affects Harvey —
-    your own Claude Code / Codex settings are never read or changed.
+    Supports local Ollama (default), Google Gemini, Groq, OpenRouter,
+    xAI Grok (paid, requires approval), Claude, and Codex.
     """
 
     provider: str = "claude"
-    model: str = ""  # empty = the provider's own default
+    model: str = ""  # empty = the provider's own default or task-based model
     reasoning_effort: str = ""  # codex only; empty = model default
+    fallback_providers: list[str] = Field(default_factory=lambda: ["groq", "gemini", "openrouter"])
+    task_routing: bool = True
+    xai_approved_paid: bool = False
+    ollama_base_url: str = ""
 
     @field_validator("provider", mode="before")
     @classmethod
@@ -758,6 +760,48 @@ class EnvConfig(BaseModel):
     m365_tenant_id: str = ""
     # Optional: only used when compliance.precleared.enabled is true.
     precleared_api_key: str = ""
+    # AI Multi-Provider API keys
+    gemini_api_key: str = ""
+    groq_api_key: str = ""
+    openrouter_api_key: str = ""
+    xai_api_key: str = ""
+    ollama_base_url: str = ""
+
+    def __repr__(self) -> str:
+        fields = []
+        for k in type(self).model_fields:
+            val = getattr(self, k, "")
+            if any(s in k.lower() for s in ["key", "secret", "password", "token"]) and val:
+                fields.append(f"{k}='****'")
+            else:
+                fields.append(f"{k}={val!r}")
+        return f"EnvConfig({', '.join(fields)})"
+
+    def __str__(self) -> str:
+        return self.__repr__()
+
+    def redacted(self) -> dict:
+        """Return dict with sensitive secrets masked for safe logging/inspection."""
+        out = {}
+        for k in type(self).model_fields:
+            val = getattr(self, k, "")
+            if any(s in k.lower() for s in ["key", "secret", "password", "token"]) and val:
+                out[k] = str(val)[:4] + "****" if len(str(val)) > 8 else "****"
+            else:
+                out[k] = val
+        return out
+
+
+def _parse_port(val: str, default: int) -> int:
+    """Parse port number with fallback for malformed or out-of-range values."""
+    try:
+        cleaned = str(val or "").strip()
+        if not cleaned:
+            return default
+        p = int(cleaned)
+        return p if 1 <= p <= 65535 else default
+    except (ValueError, TypeError):
+        return default
 
 
 def _format_validation_error(e: ValidationError) -> str:
@@ -863,16 +907,21 @@ def load_env() -> EnvConfig:
         gmail_client_id=os.getenv("GMAIL_CLIENT_ID", "").strip(),
         gmail_client_secret=os.getenv("GMAIL_CLIENT_SECRET", "").strip(),
         smtp_host=os.getenv("SMTP_HOST", "").strip(),
-        smtp_port=int(os.getenv("SMTP_PORT", "587").strip() or 587),
+        smtp_port=_parse_port(os.getenv("SMTP_PORT"), 587),
         smtp_username=os.getenv("SMTP_USERNAME", "").strip(),
         smtp_password=os.getenv("SMTP_PASSWORD", "").strip(),
         imap_host=os.getenv("IMAP_HOST", "").strip(),
-        imap_port=int(os.getenv("IMAP_PORT", "993").strip() or 993),
+        imap_port=_parse_port(os.getenv("IMAP_PORT"), 993),
         imap_username=os.getenv("IMAP_USERNAME", "").strip(),
         imap_password=os.getenv("IMAP_PASSWORD", "").strip(),
         m365_client_id=os.getenv("M365_CLIENT_ID", "").strip(),
         m365_tenant_id=os.getenv("M365_TENANT_ID", "").strip(),
         precleared_api_key=os.getenv("PRECLEARED_API_KEY", "").strip(),
+        gemini_api_key=(os.getenv("GEMINI_API_KEY", "").strip() or os.getenv("GOOGLE_API_KEY", "").strip()),
+        groq_api_key=os.getenv("GROQ_API_KEY", "").strip(),
+        openrouter_api_key=os.getenv("OPENROUTER_API_KEY", "").strip(),
+        xai_api_key=os.getenv("XAI_API_KEY", "").strip(),
+        ollama_base_url=os.getenv("OLLAMA_BASE_URL", "").strip(),
     )
     return env
 

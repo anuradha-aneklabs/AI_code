@@ -286,11 +286,14 @@ def cmd_status(args):
                 elif brain.provider == "codex":
                     print(f"  Brain:                {label} ready (CLI, isolation, login, "
                           "model and account checked; no prompt sent)")
-                else:
+                elif brain.provider == "claude":
                     print(f"  Brain:                {label} CLI isolation flags present "
                           "(login not checked: Claude is checked by its first call)")
+                else:
+                    print(f"  Brain:                {label} ready")
         elif brain_status.get("status") == "paused":
-            label = {"claude": "Claude", "codex": "Codex"}.get(brain_status.get("provider"), "Brain")
+            from harvey.brain import PROVIDER_LABELS
+            label = PROVIDER_LABELS.get(brain_status.get("provider"), "Brain")
             print(f"  Brain:                {label} PAUSED since {brain_status.get('since', '?')}")
             print(f"                        {brain_status.get('reason', '')}")
         print()
@@ -332,7 +335,8 @@ def cmd_usage(args):
         except Exception:
             pass
 
-        label = {"claude": "Claude", "codex": "Codex"}.get(provider, "Brain")
+        from harvey.brain import PROVIDER_LABELS
+        label = PROVIDER_LABELS.get(provider, "Brain")
         print(f"\n  {label} Usage")
         print("  " + "=" * 52)
         if windows:
@@ -341,6 +345,10 @@ def cmd_usage(args):
             for key, w in windows.items():
                 resets = f"  (resets {w['resets_at']})" if w.get("resets_at") else ""
                 print(f"  {labels.get(key, key):<16} {w['utilization']:5.1f}% used{resets}")
+        elif provider in ("ollama", "gemini", "groq", "openrouter"):
+            print("  Free-tier / local inference: no subscription API billing.")
+        elif provider == "xai":
+            print("  Paid API provider (billed per token by xAI).")
         elif provider == "codex":
             print("  Quota gauge unavailable (check 'codex login', the Codex CLI "
                   "version, and network).")
@@ -474,6 +482,44 @@ def cmd_gmail(args):
             print(f"\n  {'✓' if ok else '✗'} {detail}\n")
             sys.exit(0 if ok else 1)
         asyncio.run(_test())
+
+    if args.gmail_action == "sync":
+        from harvey.config import load_config
+        from harvey.integrations.gmail import GmailProvider, _load_token
+        from harvey.integrations.mail_provider import InboundMessage
+        from harvey.agents.prioritizer import EmailPrioritizationService
+        from harvey.dashboard import MOCK_INBOX_SAMPLES
+        from harvey.state import StateManager
+
+        async def _sync():
+            state = StateManager()
+            await state.init_db()
+            config = load_config()
+            provider = GmailProvider(config, env)
+            token = _load_token()
+            is_mock = not provider.is_configured() or (token and token.get("is_mock"))
+            service = EmailPrioritizationService(state=state, config=config)
+
+            print(f"\n  Starting Gmail read-only mailbox sync ({'MOCK/SANDBOX' if is_mock else 'LIVE GMAIL'})...")
+            if not is_mock:
+                messages = await provider.read_inbox(max_results=50)
+                for msg in messages:
+                    res = await service.process_inbound(msg, campaign_id="cli-sync", auto_draft_high=True, is_mock=False)
+                    print(f"  • {res.get('from_email')}: {res.get('priority', '').upper()} ({res.get('intent', '')})")
+            else:
+                for sample in MOCK_INBOX_SAMPLES.values():
+                    inbound = InboundMessage(
+                        provider_id=f"cli_sync_{sample['id']}",
+                        from_email=sample["from_email"],
+                        subject=sample["subject"],
+                        body=sample["body"],
+                        is_bounce=(sample.get("expected_intent") == "bounce"),
+                    )
+                    res = await service.process_inbound(inbound, campaign_id="cli-mock-sync", auto_draft_high=True, is_mock=True)
+                    print(f"  • [SAMPLE] {res.get('from_email')}: {res.get('priority', '').upper()} ({res.get('intent', '')})")
+            print("\n  ✓ Mailbox sync completed with read-only permissions.\n")
+            sys.exit(0)
+        asyncio.run(_sync())
 
 
 def cmd_microsoft(args):
@@ -949,6 +995,34 @@ def cmd_trulyinbox(args):
     raise SystemExit(asyncio.run(_run()))
 
 
+def cmd_db(args):
+    """Database backup and integrity maintenance."""
+    import sys
+    import asyncio
+    from harvey.state import StateManager
+
+    state = StateManager()
+    if args.db_action == "backup":
+        try:
+            dest = state.backup_db(dest_path=args.dest or None)
+            print(f"\n  ✓ Database backup created successfully:\n    {dest}\n")
+        except Exception as e:
+            print(f"\n  ✗ Database backup failed: {e}\n")
+            sys.exit(1)
+    elif args.db_action == "verify":
+        async def _verify():
+            await state.init_db()
+            res = await state.verify_integrity()
+            status_symbol = "✓" if res.get("ok") else "✗"
+            print(f"\n  {status_symbol} SQLite Integrity Check: {'PASSED' if res.get('ok') else 'FAILED'}")
+            print(f"    Schema Version (PRAGMA user_version): {res.get('user_version')}")
+            print(f"    Quick Check Output: {', '.join(res.get('quick_check', []))}")
+            print(f"    Database Path: {res.get('db_path')}\n")
+            if not res.get("ok"):
+                sys.exit(1)
+        asyncio.run(_verify())
+
+
 def cmd_sending(args):
     """Pause/resume the sending kill switch."""
     from harvey.state import StateManager
@@ -1057,13 +1131,13 @@ def main():
 
     # harvey gmail auth|test
     sub = subparsers.add_parser("gmail", help="Gmail provider setup")
-    sub.add_argument("gmail_action", choices=["auth", "test"],
+    sub.add_argument("gmail_action", choices=["auth", "test", "sync"],
                      help="auth: one-time OAuth; test: verify connection")
     sub.set_defaults(func=cmd_gmail)
 
     # harvey microsoft auth|test
     sub = subparsers.add_parser("microsoft", help="Microsoft 365 provider setup")
-    sub.add_argument("microsoft_action", choices=["auth", "test"],
+    sub.add_argument("microsoft_action", choices=["auth", "test", "sync"],
                      help="auth: one-time sign-in; test: verify connection")
     sub.set_defaults(func=cmd_microsoft)
 
@@ -1123,6 +1197,13 @@ def main():
     sub = subparsers.add_parser(
         "retry-writes", help="Retry prospects the Writer couldn't write an email for")
     sub.set_defaults(func=cmd_retry_writes)
+
+    # harvey db backup|verify
+    sub = subparsers.add_parser("db", help="Database backup and integrity maintenance")
+    sub.add_argument("db_action", choices=["backup", "verify"],
+                     help="backup: online point-in-time snapshot; verify: integrity check and WAL checkpoint")
+    sub.add_argument("--dest", default="", help="Destination file path for backup (optional)")
+    sub.set_defaults(func=cmd_db)
 
     sub = subparsers.add_parser("sending", help="Kill switch: pause/resume sending")
     sub.add_argument("sending_action", nargs="?", default="status",

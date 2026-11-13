@@ -1,44 +1,45 @@
 persona:
   name: "Harvey"
-  company: "Your Company"
+  company: "Harvey AI"
   role: "Business Development"
   email: "harvey@yourcompany.com"
   linkedin: "linkedin.com/in/harvey-yourcompany"
   tone: "professional, consultative, confident"
 
 product:
-  name: "Your Product"
-  description: "Describe what your product does and who it's for"
-  pricing: "Starting at $X/mo"
+  name: "Harvey AI"
+  description: "Autonomous B2B outreach assistant that drafts personalized introductory correspondence and multi-step follow-up sequences with human approval"
+  pricing: "Contact for details"
   key_benefits:
-    - "Benefit 1"
-    - "Benefit 2"
-    - "Benefit 3"
+    - "Automated introductory draft preparation grounded in verified public research"
+    - "Structured multi-step follow-up sequence coordination"
+    - "Human-in-the-loop review before any email is delivered"
   objection_responses:
-    "too expensive": "I understand budget is important. Most of our clients see ROI within 30 days..."
-    "already have a solution": "That makes sense. Curious — what's the one thing you wish it did better?"
-    "not interested": "No worries at all. Mind if I ask what your current approach looks like?"
+    "too expensive": "I understand budget is important. We can start with a pilot to demonstrate value."
+    "already have a solution": "Understood. Many teams use Harvey to support their existing outreach efforts."
+    "not interested": "Understood, thank you. We will close your record and not follow up further."
   offer:
-    primary: ""                    # Main offer (e.g., "Monthly subscription starting at $99/mo")
-    entry: ""                      # Low-commitment entry (e.g., "14-day free trial", "Free audit")
-    goal: "book_call"              # Goal of outreach: book_call, start_trial, get_reply
-    booking_method: "calendar_link" # calendar_link, suggest_times, ask_preference
-    booking_url: ""                # Calendar link URL (if using calendar_link method)
-    meeting_duration: "15 minutes" # How long the call is
-    meeting_owner: ""              # Who takes the meeting (name or role)
+    primary: "Autonomous B2B outreach software"
+    entry: "Product overview"
+    goal: "get_reply"
+    booking_method: "ask_preference"
+    booking_url: ""
+    meeting_duration: "15 minutes"
+    meeting_owner: "Harvey AI Team"
 
 icp:
   industries:
-    - "SaaS"
-    - "Marketing Agency"
+    - "dentist"
   company_size: "10-200 employees"
   titles:
-    - "VP Marketing"
-    - "Head of Growth"
-    - "CMO"
-    - "Director of Marketing"
+    - "Owner"
+    - "Dentist"
+    - "Dental Surgeon"
+    - "Founder"
+    - "Director"
+    - "Practice Manager"
   geography:
-    - "United States"
+    - "Indore, Madhya Pradesh, India"
   # Roles that signal a company is in-market RIGHT NOW (a company hiring a
   # "Head of Growth" is shopping for growth tooling). Used for careers-page
   # scanning and job-board discovery. Empty = fall back to titles above.
@@ -147,3 +148,16 @@ compliance:
 # every email to 220 words and one link. skills/email_rules.md is gitignored.
 # writer:
 #   email_rules: "skills/email_rules.md"
+
+# AI Brain Provider Configuration
+# Supported providers: ollama (default local), gemini (free tier), groq (free tier),
+# openrouter (free models), xai (paid only - requires approval), claude, codex.
+brain:
+  provider: "ollama"           # default provider
+  model: "qwen2.5:1.5b"        # exact installed model name
+  task_routing: true           # route routine tasks (intent, scoring) to fast models
+  fallback_providers:          # fallback order if primary provider is unavailable
+    - "groq"
+    - "gemini"
+    - "openrouter"
+  xai_approved_paid: false     # STRICT: xAI is paid only; must be true to allow xAI calls

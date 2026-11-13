@@ -8,6 +8,7 @@ works at once: nothing autopilot approved goes out after that.
 """
 
 import asyncio
+import os
 import shutil
 import sqlite3
 from pathlib import Path
@@ -305,6 +306,7 @@ async def test_the_loop_noticing_off_brings_autopilot_rows_back(state, yaml_file
     assert (await state.get_outbox_item(row))["status"] == "pending_review"
 
 
+@pytest.mark.skipif(os.name == "nt", reason="Symlinks require administrative/developer privileges on Windows")
 def test_the_writer_keeps_a_symlinked_config_a_symlink(tmp_path, yaml_file):
     real = tmp_path / "real.yaml"
     real.write_bytes(yaml_file.read_bytes())

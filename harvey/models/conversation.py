@@ -3,7 +3,7 @@
 import json
 from datetime import datetime, timezone
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 def _utcnow() -> datetime:
@@ -32,15 +32,23 @@ STAGES = [
 
 class Conversation(BaseModel):
     id: str
-    prospect_id: str
+    prospect_id: str | None = None
     campaign_id: str = ""
     channel: str = "email"
     thread: list[Message] = Field(default_factory=list)
     intent: str = ""  # interested/objection/not_interested/ooo/wrong_person
+    priority: str = "medium"  # high / medium / low
     stage: str = "initial_outreach"  # sales pipeline stage
     status: str = "open"  # open/replied/meeting_booked/closed
     created_at: datetime = Field(default_factory=_utcnow)
     updated_at: datetime = Field(default_factory=_utcnow)
+
+    @field_validator("prospect_id", mode="before")
+    @classmethod
+    def empty_prospect_id_to_none(cls, v):
+        if v == "":
+            return None
+        return v
 
     def thread_json(self) -> str:
         return json.dumps([m.model_dump(mode="json") for m in self.thread])

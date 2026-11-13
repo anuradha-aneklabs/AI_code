@@ -342,12 +342,14 @@ LEARNED_FIELDS = {
 # The shipped template's placeholder company: a persona still carrying it
 # was never set up, so training fills in the whole persona.
 UNTRAINED_COMPANY = "Your Company"
+UNTRAINED_COMPANIES = {"Your Company", "Harvey AI"}
 
 
 def _persona_untrained(persona) -> bool:
     return (
         not isinstance(persona, dict)
-        or persona.get("company") == UNTRAINED_COMPANY
+        or persona.get("company") in UNTRAINED_COMPANIES
+        or persona.get("email") in ("harvey@yourcompany.com", "")
         or not persona.get("email")
     )
 

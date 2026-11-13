@@ -39,7 +39,15 @@ _NON_RETRYABLE_PATTERNS = (
 )
 
 
-PROVIDER_LABELS = {"claude": "Claude", "codex": "Codex"}
+PROVIDER_LABELS = {
+    "ollama": "Ollama (Local)",
+    "gemini": "Google Gemini",
+    "groq": "Groq",
+    "openrouter": "OpenRouter",
+    "xai": "xAI (Grok)",
+    "claude": "Claude",
+    "codex": "Codex",
+}
 
 # Settings key holding the brain's last health transition, for `harvey
 # status` and the dashboard: {"provider", "status": "ok"|"paused", "reason",
@@ -105,10 +113,17 @@ class Brain:
                 model=self.model, reasoning_effort=self.config.reasoning_effort
             )
             self.quota = CodexQuotaClient(self.codex)
-        else:
+        elif self.provider == "claude":
             # Lazy import avoids a cycle (quota -> usage -> state).
             from harvey.integrations.quota import QuotaClient
             self.quota = QuotaClient()
+        else:
+            self.quota = None
+
+        from harvey.config import load_env
+        from harvey.providers.router import TaskRouter
+        env_dict = load_env().model_dump()
+        self.router = TaskRouter(config=self.config.model_dump(), env=env_dict)
 
     @property
     def provider_label(self) -> str:
@@ -137,8 +152,29 @@ class Brain:
         PROVIDER_RECHECK_SECONDS, so a persistent problem doesn't start
         runtimes every heartbeat.
         """
-        if self.provider != "codex":
+        if self.provider == "codex":
+            return await self._codex_preflight()
+        elif self.provider == "claude":
             return await self._claude_preflight()
+        else:
+            try:
+                provider_inst = self.router.get_provider(self.provider)
+                err = await provider_inst.preflight()
+                if err:
+                    self.unavailable = err
+                    await self._record_status("paused", err, kind="provider_error")
+                    return err
+                stored = parse_brain_status(await self.state.get_setting(BRAIN_STATUS_KEY))
+                if self.unavailable or stored.get("status") == "paused":
+                    await self._mark_available()
+                return ""
+            except Exception as e:
+                err_msg = f"Provider {self.provider} check failed: {e}"
+                self.unavailable = err_msg
+                await self._record_status("paused", err_msg, kind="provider_error")
+                return err_msg
+
+    async def _codex_preflight(self) -> str:
         from harvey.codex import CodexError
 
         await self._expire_usage_pause()
@@ -266,6 +302,11 @@ class Brain:
             return await self._think_codex(
                 prompt, session_id=session_id, timeout=timeout,
                 max_retries=max_retries, agent=agent, task=task,
+            )
+        elif self.provider != "claude":
+            return await self._think_provider(
+                prompt, session_id=session_id, expect_json=expect_json,
+                timeout=timeout, agent=agent, task=task,
             )
 
         from harvey import claude_runtime
@@ -499,6 +540,66 @@ class Brain:
             **result.usage,
         )
 
+    async def _think_provider(
+        self,
+        prompt: str,
+        session_id: str | None,
+        expect_json: bool,
+        timeout: float,
+        agent: str,
+        task: str,
+    ) -> str:
+        """Execute turn using the multi-provider router with task routing and fallback."""
+        try:
+            result = await self.router.execute(
+                prompt=prompt,
+                task=task,
+                agent=agent,
+                expect_json=expect_json,
+                timeout=timeout,
+            )
+        except Exception as e:
+            logger.error(f"Provider {self.provider} error: {e}")
+            self.last_reply_empty = True
+            return ""
+
+        if result.is_error or not result.text:
+            self.last_reply_empty = True
+            if result.error_message:
+                logger.warning(f"AI Provider call returned error: {result.error_message}")
+            return ""
+
+        self.last_reply_empty = False
+
+        # Record usage
+        try:
+            await self.state.increment_usage(provider=result.provider)
+        except Exception as e:
+            logger.warning(f"Failed to record usage counter: {e}")
+
+        try:
+            await self.state.record_usage_event(
+                agent=agent,
+                task=task or (session_id or ""),
+                session_id=session_id or "",
+                model=result.model,
+                input_tokens=result.input_tokens,
+                output_tokens=result.output_tokens,
+                cost_usd=result.cost_usd,
+                duration_ms=result.duration_ms,
+                num_turns=1,
+                is_error=False,
+                source="provider_router",
+                provider=result.provider,
+            )
+        except Exception as e:
+            logger.warning(f"Failed to record usage event: {e}")
+
+        if result.fallback_used:
+            logger.info(f"AI response provided via fallback: {result.fallback_reason}")
+
+        return result.text
+
     @staticmethod
     def _parse_result_payload(raw: str) -> tuple[str, dict | None]:
         """Split CLI JSON output into (response_text, result_payload).
@@ -585,7 +686,7 @@ class Brain:
             + "\n\nRespond ONLY with valid JSON. No markdown, no explanation."
         )
         response = await self.think(
-            full_prompt, session_id=session_id, agent=agent, task=task
+            full_prompt, session_id=session_id, expect_json=True, agent=agent, task=task
         )
         self.last_reply_empty = not response
         if not response:
@@ -646,7 +747,7 @@ class Brain:
             # not be mistaken for room to spend.
             logger.info(f"{self.paused_reason}; waiting for it to reset.")
             return False
-        if max_percent is not None:
+        if max_percent is not None and self.quota is not None:
             try:
                 windows = await self.quota.get_utilization()
             except Exception as e:

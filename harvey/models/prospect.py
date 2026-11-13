@@ -16,7 +16,7 @@ def _utcnow() -> datetime:
 
 class Prospect(BaseModel):
     id: str = ""
-    company_id: str = ""       # FK to companies table
+    company_id: str | None = None       # FK to companies table (nullable)
     first_name: str = ""       # required for a valid contact
     last_name: str = ""        # required for a valid contact
     email: str = ""
@@ -33,6 +33,13 @@ class Prospect(BaseModel):
     source_url: str = ""       # where we found the info
     status: str = "new"        # new/contacted/replied/meeting/closed/lost
     score: int = 0
+
+    @field_validator("company_id", mode="before")
+    @classmethod
+    def empty_company_id_to_none(cls, v):
+        if v == "":
+            return None
+        return v
     personalization_notes: str = ""
     # IANA time zone for the send window ("Europe/Oslo"), once known.
     timezone: str = ""
@@ -40,6 +47,11 @@ class Prospect(BaseModel):
     company: str = ""
     industry: str = ""
     company_size: str = ""
+    # CRM Pipeline automation fields
+    pipeline_stage: str = "New"  # New, Researched, Qualified, Outreach Draft Ready, Contacted, Interested, Meeting, Won, Lost
+    notes: str = ""
+    next_action: str = ""
+    follow_up_date: str = ""
     created_at: datetime = Field(default_factory=_utcnow)
     updated_at: datetime = Field(default_factory=_utcnow)
 

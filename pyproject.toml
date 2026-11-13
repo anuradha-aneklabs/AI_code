@@ -55,3 +55,9 @@ include = ["harvey*"]
 # are vendored so a local tool renders correctly with the network off.
 [tool.setuptools.package-data]
 harvey = ["web/*", "web/fonts/*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "strict"
+asyncio_default_fixture_loop_scope = "function"
+
