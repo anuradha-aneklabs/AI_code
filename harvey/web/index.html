@@ -1447,15 +1447,19 @@
 
   <div class="subhead">Sending</div>
 
-
-
   <div id="sending-mode-card"></div>
 
+  <div class="subhead" style="display:flex;justify-content:space-between;align-items:center;">
+    <span>External Integrations Management Matrix</span>
+    <button class="btn btn-secondary btn-sm" onclick="loadIntegrationMatrix()">Refresh All Statuses</button>
+  </div>
 
-
-
-
-
+  <div class="card" id="integrations-matrix-card" style="margin-bottom:24px;">
+    <p class="desc" style="margin-bottom:14px;">Live status, credential verification, and safe connectivity diagnostics across discovery, mail, CRM, and calendar.</p>
+    <div id="integration-matrix-grid" style="display:grid;grid-template-columns:repeat(auto-fill, minmax(320px, 1fr));gap:14px;">
+      <div style="padding:16px;color:var(--text-muted);">Loading integrations matrix...</div>
+    </div>
+  </div>
 
   <div class="subhead">Email provider <span class="hint">Active: <b id="active-provider">…</b> &middot; set <code>channels.email.provider</code> in <code>harvey.yaml</code> to gmail, microsoft, smtp or instantly</span></div>
 
@@ -1715,6 +1719,7 @@
 
         <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:8px;">
           <button class="btn btn-primary btn-sm" onclick="saveMicrosoft()">Save Microsoft 365</button>
+          <button class="btn btn-secondary btn-sm" id="btn-oauth-m365" onclick="startM365OAuth()">Sign In with Microsoft</button>
           <button class="btn btn-secondary btn-sm" id="btn-test-m365" onclick="testM365Connection()">Test Connection</button>
           <button class="btn btn-secondary btn-sm" id="btn-mock-m365" onclick="connectMockM365()">Connect Sandbox</button>
         </div>

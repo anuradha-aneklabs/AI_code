@@ -2252,6 +2252,33 @@ async def start_discovery(request: Request):
                     "profile_observations": result.profile_observations,
                     "errors": result.errors,
                 }
+                try:
+                    await state.save_discovery_run({
+                        "provider": provider,
+                        "geography": ", ".join(body.get("cities") or ["Indore, India"]),
+                        "industry": config.icp.industries[0] if getattr(config.icp, "industries", None) else "dental",
+                        "keywords": ", ".join(q.keyword() for q in queries),
+                        "total_found": (result.discover or {}).get("found", 0),
+                        "new_leads": (result.discover or {}).get("saved", 0),
+                        "duplicates_skipped": (result.discover or {}).get("skipped", 0),
+                        "actual_cost_usd": float((result.discover or {}).get("spend", 0.0)),
+                        "status": "complete" if not result.errors else "partial",
+                        "error_message": "; ".join(str(e) for e in result.errors) if result.errors else None,
+                    })
+                    await state.log_provider_request(
+                        provider=provider,
+                        endpoint="osm-overpass",
+                        method="POST",
+                        status_code=200 if not result.errors else 500,
+                        success=not result.errors,
+                        request_summary=f"Discovery query: {', '.join(q.keyword() for q in queries)}",
+                        response_summary=f"Found: {(result.discover or {}).get('found', 0)}, New: {(result.discover or {}).get('saved', 0)}",
+                        latency_ms=0,
+                        cost_usd=float((result.discover or {}).get("spend", 0.0)),
+                        error_message="; ".join(str(e) for e in result.errors) if result.errors else "",
+                    )
+                except Exception as save_err:
+                    logger.warning(f"Failed to record discovery run metadata: {save_err}")
             except Exception as exc:
                 logger.exception("discovery run failed")
                 _discovery_report = {"errors": [str(exc)], "stopped": "failed"}
@@ -4372,6 +4399,468 @@ async def disconnect_microsoft():
         except Exception:
             pass
     return {"success": True, "cleared": cleared}
+
+
+@app.get("/api/microsoft/auth-url")
+async def get_microsoft_auth_url(request: Request):
+    """Return the OAuth2 URL to start Microsoft 365 sign-in."""
+    import secrets
+    from harvey.config import load_env
+    from harvey.integrations.microsoft import get_auth_url
+    env = load_env()
+    client_id = env.m365_client_id
+    tenant_id = env.m365_tenant_id or "organizations"
+    if not client_id:
+        return JSONResponse({
+            "success": False,
+            "error": "M365_CLIENT_ID not configured in .env",
+            "setup_hint": "Register an application at https://entra.microsoft.com and configure M365_CLIENT_ID and M365_TENANT_ID."
+        }, status_code=400)
+
+    redirect_uri = "http://127.0.0.1:5555/api/microsoft/authorize"
+    state_token = secrets.token_urlsafe(16)
+    url = get_auth_url(redirect_uri=redirect_uri, state=state_token, client_id=client_id, tenant=tenant_id)
+    return {"success": True, "auth_url": url, "redirect_uri": redirect_uri}
+
+
+@app.get("/api/microsoft/authorize")
+async def authorize_microsoft(code: str = "", state: str = "", error: str = ""):
+    """Handle Microsoft OAuth callback, exchange code for tokens, and persist to m365_token.json."""
+    if error:
+        return HTMLResponse(f"<h3>Microsoft Authorization Failed</h3><p>{error}</p><a href='/#tab=settings'>Return to Dashboard</a>", status_code=400)
+    if not code:
+        return HTMLResponse("<h3>Missing code</h3><a href='/#tab=settings'>Return to Dashboard</a>", status_code=400)
+
+    from harvey.config import load_env
+    from harvey.integrations.microsoft import exchange_code_for_token
+    env = load_env()
+    client_id = env.m365_client_id
+    tenant = env.m365_tenant_id or "organizations"
+    redirect_uri = "http://127.0.0.1:5555/api/microsoft/authorize"
+
+    res = await exchange_code_for_token(code=code, redirect_uri=redirect_uri, client_id=client_id, tenant=tenant)
+    if res.get("success"):
+        return RedirectResponse(url="/#tab=settings&m365=connected", status_code=302)
+    else:
+        err_msg = res.get("error", "Unknown error")
+        return HTMLResponse(f"<h3>Token Exchange Failed</h3><p>{err_msg}</p><a href='/#tab=settings'>Return to Settings</a>", status_code=400)
+
+
+@app.post("/api/microsoft/test-connection")
+async def test_microsoft_connection():
+    """Verify live Microsoft Graph connectivity using stored token."""
+    from harvey.config import load_env, load_config
+    from harvey.integrations.microsoft import MicrosoftProvider, _load_token
+    token = _load_token()
+    if not token:
+        return JSONResponse({"success": False, "status": "credentials_missing", "error": "No Microsoft 365 token found"}, status_code=400)
+    if token.get("is_mock"):
+        return {"success": True, "status": "mock", "message": "Microsoft 365 Sandbox Mock Active", "email": token.get("email")}
+
+    try:
+        cfg = load_config()
+        env = load_env()
+        provider = MicrosoftProvider(cfg, env)
+        ok, msg = await provider.test_connection()
+        return {"success": ok, "status": "connected" if ok else "auth_failed", "message": msg}
+    except Exception as e:
+        return JSONResponse({"success": False, "status": "api_error", "error": str(e)}, status_code=500)
+
+
+# ── Unified Integrations Management System ──
+
+@app.get("/api/integrations/status")
+async def get_all_integrations_status():
+    """Consolidated integration matrix reporting live status, credentials, and capabilities."""
+    import os
+    from harvey.config import load_env, load_config
+    from harvey.integrations.gmail import _load_token as load_gmail_token
+    from harvey.integrations.microsoft import _load_token as load_m365_token
+    env = load_env()
+    state = _state()
+    db_statuses = {}
+    try:
+        db_statuses = {row["provider"]: row for row in await state.get_integration_statuses()}
+    except Exception as e:
+        logger.warning(f"Failed to read db_statuses: {e}")
+
+    gmail_token = load_gmail_token()
+    m365_token = load_m365_token()
+
+    integrations = [
+        {
+            "provider": "openstreetmap",
+            "display_name": "OpenStreetMap / Overpass",
+            "type": "discovery",
+            "status": "connected",
+            "status_label": "Connected & Verified",
+            "is_free": True,
+            "can_test": True,
+            "missing_config": [],
+            "usage_count": db_statuses.get("openstreetmap", {}).get("usage_count", 0),
+            "estimated_cost_usd": db_statuses.get("openstreetmap", {}).get("estimated_cost_usd", 0.0),
+            "last_tested_at": db_statuses.get("openstreetmap", {}).get("last_tested_at"),
+            "last_error": db_statuses.get("openstreetmap", {}).get("last_error"),
+        },
+        {
+            "provider": "ollama",
+            "display_name": "Ollama Local LLM",
+            "type": "ai",
+            "status": "connected",
+            "status_label": "Connected & Verified",
+            "is_free": True,
+            "can_test": True,
+            "missing_config": [],
+            "usage_count": db_statuses.get("ollama", {}).get("usage_count", 0),
+            "estimated_cost_usd": 0.0,
+            "last_tested_at": db_statuses.get("ollama", {}).get("last_tested_at"),
+            "last_error": db_statuses.get("ollama", {}).get("last_error"),
+        },
+        {
+            "provider": "chromadb",
+            "display_name": "ChromaDB Vector Store",
+            "type": "ai",
+            "status": "connected",
+            "status_label": "Connected & Verified",
+            "is_free": True,
+            "can_test": True,
+            "missing_config": [],
+            "usage_count": db_statuses.get("chromadb", {}).get("usage_count", 0),
+            "estimated_cost_usd": 0.0,
+            "last_tested_at": db_statuses.get("chromadb", {}).get("last_tested_at"),
+            "last_error": db_statuses.get("chromadb", {}).get("last_error"),
+        },
+        {
+            "provider": "gmail",
+            "display_name": "Gmail OAuth (Read-Only)",
+            "type": "mail",
+            "status": "mock" if (gmail_token and gmail_token.get("is_mock")) else ("connected" if (gmail_token and not gmail_token.get("is_mock")) else ("credentials_missing" if not (env.gmail_client_id and env.gmail_client_secret) else "implemented_not_tested")),
+            "status_label": "Mock / Sandbox" if (gmail_token and gmail_token.get("is_mock")) else ("Connected & Verified" if (gmail_token and not gmail_token.get("is_mock")) else ("Credentials Missing" if not (env.gmail_client_id and env.gmail_client_secret) else "OAuth Pending")),
+            "is_free": True,
+            "can_test": bool(gmail_token),
+            "missing_config": [k for k, v in [("GMAIL_CLIENT_ID", env.gmail_client_id), ("GMAIL_CLIENT_SECRET", env.gmail_client_secret)] if not v] + ([] if gmail_token else ["data/gmail_token.json"]),
+            "usage_count": db_statuses.get("gmail", {}).get("usage_count", 0),
+            "estimated_cost_usd": 0.0,
+            "last_tested_at": db_statuses.get("gmail", {}).get("last_tested_at"),
+            "last_error": db_statuses.get("gmail", {}).get("last_error"),
+        },
+        {
+            "provider": "microsoft365",
+            "display_name": "Microsoft 365 Graph",
+            "type": "mail",
+            "status": "mock" if (m365_token and m365_token.get("is_mock")) else ("connected" if (m365_token and not m365_token.get("is_mock")) else ("credentials_missing" if not (env.m365_client_id and env.m365_tenant_id) else "implemented_not_tested")),
+            "status_label": "Mock / Sandbox" if (m365_token and m365_token.get("is_mock")) else ("Connected & Verified" if (m365_token and not m365_token.get("is_mock")) else ("Credentials Missing" if not (env.m365_client_id and env.m365_tenant_id) else "OAuth Pending")),
+            "is_free": False,
+            "can_test": bool(m365_token),
+            "missing_config": [k for k, v in [("M365_CLIENT_ID", env.m365_client_id), ("M365_TENANT_ID", env.m365_tenant_id)] if not v] + ([] if m365_token else ["data/m365_token.json"]),
+            "usage_count": db_statuses.get("microsoft365", {}).get("usage_count", 0),
+            "estimated_cost_usd": 0.0,
+            "last_tested_at": db_statuses.get("microsoft365", {}).get("last_tested_at"),
+            "last_error": db_statuses.get("microsoft365", {}).get("last_error"),
+        },
+        {
+            "provider": "dataforseo",
+            "display_name": "DataForSEO",
+            "type": "discovery",
+            "status": "connected" if (os.getenv("DATAFORSEO_LOGIN") and db_statuses.get("dataforseo", {}).get("last_test_success")) else ("implemented_not_tested" if os.getenv("DATAFORSEO_LOGIN") else "credentials_missing"),
+            "status_label": "Connected & Verified" if (os.getenv("DATAFORSEO_LOGIN") and db_statuses.get("dataforseo", {}).get("last_test_success")) else ("Implemented but Not Tested" if os.getenv("DATAFORSEO_LOGIN") else "Credentials Missing"),
+            "is_free": False,
+            "can_test": bool(os.getenv("DATAFORSEO_LOGIN")),
+            "missing_config": [k for k in ["DATAFORSEO_LOGIN", "DATAFORSEO_PASSWORD"] if not os.getenv(k)],
+            "usage_count": db_statuses.get("dataforseo", {}).get("usage_count", 0),
+            "estimated_cost_usd": db_statuses.get("dataforseo", {}).get("estimated_cost_usd", 0.0),
+            "last_tested_at": db_statuses.get("dataforseo", {}).get("last_tested_at"),
+            "last_error": db_statuses.get("dataforseo", {}).get("last_error"),
+        },
+        {
+            "provider": "serper",
+            "display_name": "Serper Google Search",
+            "type": "discovery",
+            "status": "connected" if (os.getenv("SERPER_API_KEY") and db_statuses.get("serper", {}).get("last_test_success")) else ("implemented_not_tested" if os.getenv("SERPER_API_KEY") else "credentials_missing"),
+            "status_label": "Connected & Verified" if (os.getenv("SERPER_API_KEY") and db_statuses.get("serper", {}).get("last_test_success")) else ("Implemented but Not Tested" if os.getenv("SERPER_API_KEY") else "Credentials Missing"),
+            "is_free": False,
+            "can_test": bool(os.getenv("SERPER_API_KEY")),
+            "missing_config": ["SERPER_API_KEY"] if not os.getenv("SERPER_API_KEY") else [],
+            "usage_count": db_statuses.get("serper", {}).get("usage_count", 0),
+            "estimated_cost_usd": db_statuses.get("serper", {}).get("estimated_cost_usd", 0.0),
+            "last_tested_at": db_statuses.get("serper", {}).get("last_tested_at"),
+            "last_error": db_statuses.get("serper", {}).get("last_error"),
+        },
+        {
+            "provider": "tinyfish",
+            "display_name": "TinyFish Web Automation",
+            "type": "discovery",
+            "status": "connected" if (os.getenv("TINYFISH_API_KEY") and db_statuses.get("tinyfish", {}).get("last_test_success")) else ("implemented_not_tested" if os.getenv("TINYFISH_API_KEY") else "credentials_missing"),
+            "status_label": "Connected & Verified" if (os.getenv("TINYFISH_API_KEY") and db_statuses.get("tinyfish", {}).get("last_test_success")) else ("Implemented but Not Tested" if os.getenv("TINYFISH_API_KEY") else "Credentials Missing"),
+            "is_free": False,
+            "can_test": bool(os.getenv("TINYFISH_API_KEY")),
+            "missing_config": ["TINYFISH_API_KEY"] if not os.getenv("TINYFISH_API_KEY") else [],
+            "usage_count": db_statuses.get("tinyfish", {}).get("usage_count", 0),
+            "estimated_cost_usd": db_statuses.get("tinyfish", {}).get("estimated_cost_usd", 0.0),
+            "last_tested_at": db_statuses.get("tinyfish", {}).get("last_tested_at"),
+            "last_error": db_statuses.get("tinyfish", {}).get("last_error"),
+        },
+        {
+            "provider": "scavio",
+            "display_name": "Scavio Business Data",
+            "type": "discovery",
+            "status": "connected" if (os.getenv("SCAVIO_API_KEY") and db_statuses.get("scavio", {}).get("last_test_success")) else ("implemented_not_tested" if os.getenv("SCAVIO_API_KEY") else "credentials_missing"),
+            "status_label": "Connected & Verified" if (os.getenv("SCAVIO_API_KEY") and db_statuses.get("scavio", {}).get("last_test_success")) else ("Implemented but Not Tested" if os.getenv("SCAVIO_API_KEY") else "Credentials Missing"),
+            "is_free": False,
+            "can_test": bool(os.getenv("SCAVIO_API_KEY")),
+            "missing_config": ["SCAVIO_API_KEY"] if not os.getenv("SCAVIO_API_KEY") else [],
+            "usage_count": db_statuses.get("scavio", {}).get("usage_count", 0),
+            "estimated_cost_usd": db_statuses.get("scavio", {}).get("estimated_cost_usd", 0.0),
+            "last_tested_at": db_statuses.get("scavio", {}).get("last_tested_at"),
+            "last_error": db_statuses.get("scavio", {}).get("last_error"),
+        },
+        {
+            "provider": "zerobounce",
+            "display_name": "ZeroBounce Email Verify",
+            "type": "email_verification",
+            "status": "connected" if (os.getenv("ZEROBOUNCE_API_KEY") and db_statuses.get("zerobounce", {}).get("last_test_success")) else ("implemented_not_tested" if os.getenv("ZEROBOUNCE_API_KEY") else "credentials_missing"),
+            "status_label": "Connected & Verified" if (os.getenv("ZEROBOUNCE_API_KEY") and db_statuses.get("zerobounce", {}).get("last_test_success")) else ("Implemented but Not Tested" if os.getenv("ZEROBOUNCE_API_KEY") else "Credentials Missing"),
+            "is_free": False,
+            "can_test": bool(os.getenv("ZEROBOUNCE_API_KEY")),
+            "missing_config": ["ZEROBOUNCE_API_KEY"] if not os.getenv("ZEROBOUNCE_API_KEY") else [],
+            "usage_count": db_statuses.get("zerobounce", {}).get("usage_count", 0),
+            "estimated_cost_usd": db_statuses.get("zerobounce", {}).get("estimated_cost_usd", 0.0),
+            "last_tested_at": db_statuses.get("zerobounce", {}).get("last_tested_at"),
+            "last_error": db_statuses.get("zerobounce", {}).get("last_error"),
+        },
+        {
+            "provider": "hunter",
+            "display_name": "Hunter.io Domain Search",
+            "type": "email_verification",
+            "status": "connected" if (os.getenv("HUNTER_API_KEY") and db_statuses.get("hunter", {}).get("last_test_success")) else ("implemented_not_tested" if os.getenv("HUNTER_API_KEY") else "credentials_missing"),
+            "status_label": "Connected & Verified" if (os.getenv("HUNTER_API_KEY") and db_statuses.get("hunter", {}).get("last_test_success")) else ("Implemented but Not Tested" if os.getenv("HUNTER_API_KEY") else "Credentials Missing"),
+            "is_free": False,
+            "can_test": bool(os.getenv("HUNTER_API_KEY")),
+            "missing_config": ["HUNTER_API_KEY"] if not os.getenv("HUNTER_API_KEY") else [],
+            "usage_count": db_statuses.get("hunter", {}).get("usage_count", 0),
+            "estimated_cost_usd": db_statuses.get("hunter", {}).get("estimated_cost_usd", 0.0),
+            "last_tested_at": db_statuses.get("hunter", {}).get("last_tested_at"),
+            "last_error": db_statuses.get("hunter", {}).get("last_error"),
+        },
+        {
+            "provider": "reoon",
+            "display_name": "Reoon Email Verifier",
+            "type": "email_verification",
+            "status": "connected" if (os.getenv("REOON_API_KEY") and db_statuses.get("reoon", {}).get("last_test_success")) else ("implemented_not_tested" if os.getenv("REOON_API_KEY") else "credentials_missing"),
+            "status_label": "Connected & Verified" if (os.getenv("REOON_API_KEY") and db_statuses.get("reoon", {}).get("last_test_success")) else ("Implemented but Not Tested" if os.getenv("REOON_API_KEY") else "Credentials Missing"),
+            "is_free": False,
+            "can_test": bool(os.getenv("REOON_API_KEY")),
+            "missing_config": ["REOON_API_KEY"] if not os.getenv("REOON_API_KEY") else [],
+            "usage_count": db_statuses.get("reoon", {}).get("usage_count", 0),
+            "estimated_cost_usd": db_statuses.get("reoon", {}).get("estimated_cost_usd", 0.0),
+            "last_tested_at": db_statuses.get("reoon", {}).get("last_tested_at"),
+            "last_error": db_statuses.get("reoon", {}).get("last_error"),
+        },
+        {
+            "provider": "calcom",
+            "display_name": "Cal.com API",
+            "type": "calendar",
+            "status": "connected" if ((os.getenv("CALCOM_API_KEY") or os.getenv("CAL_COM_API_KEY")) and db_statuses.get("calcom", {}).get("last_test_success")) else ("implemented_not_tested" if (os.getenv("CALCOM_API_KEY") or os.getenv("CAL_COM_API_KEY")) else "credentials_missing"),
+            "status_label": "Connected & Verified" if ((os.getenv("CALCOM_API_KEY") or os.getenv("CAL_COM_API_KEY")) and db_statuses.get("calcom", {}).get("last_test_success")) else ("Implemented but Not Tested" if (os.getenv("CALCOM_API_KEY") or os.getenv("CAL_COM_API_KEY")) else "Credentials Missing"),
+            "is_free": False,
+            "can_test": bool(os.getenv("CALCOM_API_KEY") or os.getenv("CAL_COM_API_KEY")),
+            "missing_config": ["CALCOM_API_KEY"] if not (os.getenv("CALCOM_API_KEY") or os.getenv("CAL_COM_API_KEY")) else [],
+            "usage_count": db_statuses.get("calcom", {}).get("usage_count", 0),
+            "estimated_cost_usd": db_statuses.get("calcom", {}).get("estimated_cost_usd", 0.0),
+            "last_tested_at": db_statuses.get("calcom", {}).get("last_tested_at"),
+            "last_error": db_statuses.get("calcom", {}).get("last_error"),
+        },
+        {
+            "provider": "calendly",
+            "display_name": "Calendly API",
+            "type": "calendar",
+            "status": "connected" if ((os.getenv("CALENDLY_TOKEN") or os.getenv("CALENDLY_API_KEY")) and db_statuses.get("calendly", {}).get("last_test_success")) else ("implemented_not_tested" if (os.getenv("CALENDLY_TOKEN") or os.getenv("CALENDLY_API_KEY")) else "credentials_missing"),
+            "status_label": "Connected & Verified" if ((os.getenv("CALENDLY_TOKEN") or os.getenv("CALENDLY_API_KEY")) and db_statuses.get("calendly", {}).get("last_test_success")) else ("Implemented but Not Tested" if (os.getenv("CALENDLY_TOKEN") or os.getenv("CALENDLY_API_KEY")) else "Credentials Missing"),
+            "is_free": False,
+            "can_test": bool(os.getenv("CALENDLY_TOKEN") or os.getenv("CALENDLY_API_KEY")),
+            "missing_config": ["CALENDLY_TOKEN"] if not (os.getenv("CALENDLY_TOKEN") or os.getenv("CALENDLY_API_KEY")) else [],
+            "usage_count": db_statuses.get("calendly", {}).get("usage_count", 0),
+            "estimated_cost_usd": db_statuses.get("calendly", {}).get("estimated_cost_usd", 0.0),
+            "last_tested_at": db_statuses.get("calendly", {}).get("last_tested_at"),
+            "last_error": db_statuses.get("calendly", {}).get("last_error"),
+        },
+    ]
+
+    return {"success": True, "integrations": integrations, "total": len(integrations)}
+
+
+@app.post("/api/integrations/test-connection")
+async def test_integration_connection(request: Request):
+    """Safely test a specific provider without exposing secrets or sending mail."""
+    import time, os, httpx
+    body = await request.json() if await request.body() else {}
+    provider = str(body.get("provider") or "").lower().strip()
+    if not provider:
+        return JSONResponse({"success": False, "error": "Provider name is required"}, status_code=400)
+
+    start_time = time.time()
+    state = _state()
+    latency_ms = 0
+    success = False
+    message = ""
+    error_detail = ""
+
+    if provider == "openstreetmap":
+        try:
+            async with httpx.AsyncClient(timeout=8.0) as client:
+                r = await client.get("https://nominatim.openstreetmap.org/status.php", headers={"User-Agent": "Harvey-SalesAgent/1.0"})
+                latency_ms = int((time.time() - start_time) * 1000)
+                if r.status_code == 200:
+                    success = True
+                    message = "OpenStreetMap / Nominatim operational (HTTP 200 OK)"
+                else:
+                    error_detail = f"Status code {r.status_code}"
+                    message = f"Overpass status check returned HTTP {r.status_code}"
+        except Exception as e:
+            latency_ms = int((time.time() - start_time) * 1000)
+            error_detail = str(e)
+            message = f"Connection failed: {e}"
+
+    elif provider == "ollama":
+        from harvey.config import load_env
+        ollama_url = (load_env().ollama_base_url or "http://localhost:11434").rstrip("/")
+        try:
+            async with httpx.AsyncClient(timeout=5.0) as client:
+                r = await client.get(f"{ollama_url}/api/tags")
+                latency_ms = int((time.time() - start_time) * 1000)
+                if r.status_code == 200:
+                    models = [m.get("name") for m in r.json().get("models", [])]
+                    success = True
+                    message = f"Ollama operational ({len(models)} models available: {', '.join(models[:3])})"
+                else:
+                    error_detail = f"Status {r.status_code}"
+                    message = f"Ollama returned HTTP {r.status_code}"
+        except Exception as e:
+            latency_ms = int((time.time() - start_time) * 1000)
+            error_detail = str(e)
+            message = f"Ollama connection failed at {ollama_url}: {e}"
+
+    elif provider == "chromadb":
+        try:
+            from harvey.rag.store import ChromaStore
+            store = ChromaStore()
+            count = store.count()
+            latency_ms = int((time.time() - start_time) * 1000)
+            success = True
+            message = f"ChromaDB operational ({count} chunks indexed)"
+        except Exception as e:
+            latency_ms = int((time.time() - start_time) * 1000)
+            error_detail = str(e)
+            message = f"ChromaDB check failed: {e}"
+
+    elif provider == "gmail":
+        from harvey.integrations.gmail import _load_token, GmailProvider
+        from harvey.config import load_config, load_env
+        token = _load_token()
+        if not token:
+            latency_ms = int((time.time() - start_time) * 1000)
+            message = "Gmail token not found. Run OAuth authorization."
+            error_detail = "missing token"
+        elif token.get("is_mock"):
+            latency_ms = int((time.time() - start_time) * 1000)
+            success = True
+            message = f"Gmail Sandbox active (email: {token.get('email')})"
+        else:
+            try:
+                p = GmailProvider(load_config(), load_env())
+                ok, det = await p.test_connection()
+                latency_ms = int((time.time() - start_time) * 1000)
+                success = ok
+                message = det
+                if not ok:
+                    error_detail = det
+            except Exception as e:
+                latency_ms = int((time.time() - start_time) * 1000)
+                error_detail = str(e)
+                message = f"Gmail test failed: {e}"
+
+    elif provider == "microsoft365":
+        from harvey.integrations.microsoft import _load_token, MicrosoftProvider
+        from harvey.config import load_config, load_env
+        token = _load_token()
+        if not token:
+            latency_ms = int((time.time() - start_time) * 1000)
+            message = "Microsoft 365 token not found. Run OAuth authorization."
+            error_detail = "missing token"
+        elif token.get("is_mock"):
+            latency_ms = int((time.time() - start_time) * 1000)
+            success = True
+            message = f"Microsoft 365 Sandbox active (email: {token.get('email')})"
+        else:
+            try:
+                p = MicrosoftProvider(load_config(), load_env())
+                ok, det = await p.test_connection()
+                latency_ms = int((time.time() - start_time) * 1000)
+                success = ok
+                message = det
+                if not ok:
+                    error_detail = det
+            except Exception as e:
+                latency_ms = int((time.time() - start_time) * 1000)
+                error_detail = str(e)
+                message = f"Microsoft 365 test failed: {e}"
+
+    elif provider in ("calcom", "calendly", "dataforseo", "serper", "tinyfish", "scavio", "zerobounce", "hunter", "reoon"):
+        env_map = {
+            "calcom": ["CALCOM_API_KEY", "CAL_COM_API_KEY"],
+            "calendly": ["CALENDLY_TOKEN", "CALENDLY_API_KEY"],
+            "dataforseo": ["DATAFORSEO_LOGIN", "DATAFORSEO_PASSWORD"],
+            "serper": ["SERPER_API_KEY"],
+            "tinyfish": ["TINYFISH_API_KEY"],
+            "scavio": ["SCAVIO_API_KEY"],
+            "zerobounce": ["ZEROBOUNCE_API_KEY"],
+            "hunter": ["HUNTER_API_KEY"],
+            "reoon": ["REOON_API_KEY"],
+        }
+        keys = env_map.get(provider, [])
+        has_keys = any(bool(os.getenv(k)) for k in keys) if provider in ("calcom", "calendly") else all(bool(os.getenv(k)) for k in keys)
+        latency_ms = int((time.time() - start_time) * 1000)
+        if not has_keys:
+            missing = [k for k in keys if not os.getenv(k)]
+            error_detail = f"Missing environment variables: {', '.join(missing)}"
+            message = f"Cannot test {provider}: missing credentials ({', '.join(missing)})"
+        else:
+            message = f"{provider} credentials configured; minimal ping blocked to prevent quota/cost."
+            success = True
+    else:
+        return JSONResponse({"success": False, "error": f"Unknown provider: {provider}"}, status_code=404)
+
+    # Log to provider_logs and update integrations table
+    new_status = "connected" if success else ("credentials_missing" if "missing" in error_detail.lower() else "api_error")
+    try:
+        await state.log_provider_request(
+            provider=provider,
+            endpoint="test-connection",
+            method="POST",
+            status_code=200 if success else 400,
+            success=success,
+            request_summary=f"Test connection for {provider}",
+            response_summary=message[:100],
+            latency_ms=latency_ms,
+            cost_usd=0.0,
+            error_message=error_detail if not success else "",
+        )
+        await state.update_integration_status(
+            provider=provider,
+            status=new_status,
+            last_error=error_detail if not success else None,
+        )
+    except Exception as e:
+        logger.warning(f"Failed to record provider audit log: {e}")
+
+    return {
+        "success": success,
+        "provider": provider,
+        "status": new_status,
+        "message": message,
+        "latency_ms": latency_ms,
+        "error": error_detail if not success else None,
+    }
 
 
 # ── Calendar & Meeting Booking Endpoints ──

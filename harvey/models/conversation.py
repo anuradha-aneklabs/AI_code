@@ -32,7 +32,7 @@ STAGES = [
 
 class Conversation(BaseModel):
     id: str
-    prospect_id: str | None = None
+    prospect_id: str | None
     campaign_id: str = ""
     channel: str = "email"
     thread: list[Message] = Field(default_factory=list)

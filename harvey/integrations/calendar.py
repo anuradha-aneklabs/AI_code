@@ -20,6 +20,8 @@ import httpx
 
 logger = logging.getLogger("harvey.calendar")
 
+CAL_TIMEOUT = httpx.Timeout(connect=5.0, read=15.0, write=5.0, pool=5.0)
+
 SUPPORTED_PLATFORMS = {
     "cal.com": "Cal.com",
     "calendly.com": "Calendly",
@@ -28,6 +30,138 @@ SUPPORTED_PLATFORMS = {
     "tidycal.com": "TidyCal",
     "zcal.co": "Zcal",
 }
+
+
+async def get_calcom_event_types(api_key: str) -> list[dict[str, Any]]:
+    """Retrieve event types from Cal.com v1 API."""
+    if not api_key:
+        return []
+    url = f"https://api.cal.com/v1/event-types?apiKey={api_key}"
+    for attempt in range(2):
+        try:
+            async with httpx.AsyncClient(timeout=CAL_TIMEOUT) as client:
+                resp = await client.get(url)
+                if resp.status_code == 200:
+                    data = resp.json()
+                    return data.get("event_types", [])
+                elif resp.status_code in (401, 403):
+                    logger.warning(f"Cal.com auth failed: {resp.status_code}")
+                    break
+        except Exception as e:
+            if attempt == 1:
+                logger.warning(f"Cal.com event-types request error: {e}")
+            await asyncio.sleep(0.5)
+    return []
+
+
+async def get_calcom_slots(
+    api_key: str,
+    event_type_id: int | str,
+    start_time: str,
+    end_time: str,
+    time_zone: str = "UTC",
+) -> list[dict[str, Any]]:
+    """Fetch live available meeting slots from Cal.com v1 API."""
+    if not api_key or not event_type_id:
+        return []
+    url = "https://api.cal.com/v1/slots/available"
+    params = {
+        "apiKey": api_key,
+        "eventTypeId": str(event_type_id),
+        "startTime": start_time,
+        "endTime": end_time,
+        "timeZone": time_zone,
+    }
+    for attempt in range(2):
+        try:
+            async with httpx.AsyncClient(timeout=CAL_TIMEOUT) as client:
+                resp = await client.get(url, params=params)
+                if resp.status_code == 200:
+                    data = resp.json()
+                    # Cal.com returns {"slots": {"YYYY-MM-DD": [{"time": "ISO"}, ...]}}
+                    slots_dict = data.get("slots", {})
+                    out_slots = []
+                    for day_date, slot_list in slots_dict.items():
+                        for item in slot_list:
+                            slot_time = item.get("time") if isinstance(item, dict) else str(item)
+                            out_slots.append({
+                                "start": slot_time,
+                                "date": day_date,
+                                "available": True,
+                                "provider": "cal.com",
+                            })
+                    return out_slots
+                elif resp.status_code in (401, 403):
+                    logger.warning(f"Cal.com API auth failed: {resp.status_code}")
+                    break
+        except Exception as e:
+            if attempt == 1:
+                logger.warning(f"Cal.com slots request failed: {e}")
+            await asyncio.sleep(0.5)
+    return []
+
+
+async def get_calendly_event_types(token: str) -> list[dict[str, Any]]:
+    """Retrieve event types for current user from Calendly v2 API."""
+    if not token:
+        return []
+    headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+    for attempt in range(2):
+        try:
+            async with httpx.AsyncClient(timeout=CAL_TIMEOUT) as client:
+                # First get current user uri
+                user_resp = await client.get("https://api.calendly.com/users/me", headers=headers)
+                if user_resp.status_code != 200:
+                    return []
+                user_uri = user_resp.json().get("resource", {}).get("uri", "")
+                if not user_uri:
+                    return []
+                resp = await client.get(f"https://api.calendly.com/event_types?user={user_uri}", headers=headers)
+                if resp.status_code == 200:
+                    return resp.json().get("collection", [])
+        except Exception as e:
+            if attempt == 1:
+                logger.warning(f"Calendly event-types error: {e}")
+            await asyncio.sleep(0.5)
+    return []
+
+
+async def get_calendly_slots(
+    token: str,
+    event_type_uri: str,
+    start_time: str,
+    end_time: str,
+) -> list[dict[str, Any]]:
+    """Fetch live available time slots from Calendly v2 API."""
+    if not token or not event_type_uri:
+        return []
+    headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+    params = {
+        "event_type": event_type_uri,
+        "start_time": start_time,
+        "end_time": end_time,
+    }
+    for attempt in range(2):
+        try:
+            async with httpx.AsyncClient(timeout=CAL_TIMEOUT) as client:
+                resp = await client.get("https://api.calendly.com/event_type_available_times", headers=headers, params=params)
+                if resp.status_code == 200:
+                    data = resp.json()
+                    collection = data.get("collection", [])
+                    return [
+                        {
+                            "start": item.get("start_time"),
+                            "status": item.get("status"),
+                            "available": item.get("status") == "available",
+                            "provider": "calendly",
+                        }
+                        for item in collection
+                    ]
+        except Exception as e:
+            if attempt == 1:
+                logger.warning(f"Calendly slots request error: {e}")
+            await asyncio.sleep(0.5)
+    return []
 
 
 def parse_booking_url(url: str) -> dict[str, Any]:
@@ -159,6 +293,7 @@ class CalendarClient:
         If an external API is connected, queries it. Otherwise, computes
         valid business hour slots (09:00 - 17:00 Mon-Fri) respecting quiet hours.
         """
+        import os
         tz_name = timezone_str or self.default_timezone
 
         # Parse days ahead from date_range (e.g. '7d', '14d', '3d')
@@ -168,8 +303,42 @@ class CalendarClient:
             except ValueError:
                 days_ahead = 7
 
-        slots: list[dict[str, Any]] = []
         now = datetime.now(timezone.utc)
+        end_time_dt = now + timedelta(days=days_ahead)
+
+        # 1. Try Cal.com API if credentials are provided
+        calcom_key = self.api_key or os.getenv("CALCOM_API_KEY") or os.getenv("CAL_COM_API_KEY") or ""
+        if calcom_key:
+            event_types = await get_calcom_event_types(calcom_key)
+            if event_types:
+                et_id = event_types[0].get("id")
+                api_slots = await get_calcom_slots(
+                    api_key=calcom_key,
+                    event_type_id=et_id,
+                    start_time=now.isoformat(),
+                    end_time=end_time_dt.isoformat(),
+                    time_zone=tz_name,
+                )
+                if api_slots:
+                    return api_slots
+
+        # 2. Try Calendly API if token is provided
+        calendly_token = os.getenv("CALENDLY_TOKEN") or os.getenv("CALENDLY_API_KEY") or ""
+        if calendly_token:
+            c_event_types = await get_calendly_event_types(calendly_token)
+            if c_event_types:
+                et_uri = c_event_types[0].get("uri")
+                api_slots = await get_calendly_slots(
+                    token=calendly_token,
+                    event_type_uri=et_uri,
+                    start_time=now.isoformat(),
+                    end_time=end_time_dt.isoformat(),
+                )
+                if api_slots:
+                    return api_slots
+
+        # 3. Fallback: Generate RFC-compliant simulated business-hour slots
+        slots: list[dict[str, Any]] = []
         duration_min = self._parsed_info.get("duration_minutes", 15) if self._parsed_info else 15
 
         # Standard business slots: 10:00, 11:30, 14:00, 15:30
@@ -207,6 +376,7 @@ class CalendarClient:
                     "duration_minutes": duration_min,
                     "booking_url": self.booking_url or "https://cal.com/harvey-team/15min",
                     "available": True,
+                    "is_simulated": True,
                 })
 
         return slots

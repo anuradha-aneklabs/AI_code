@@ -66,6 +66,10 @@ SCOPE = (
     "offline_access https://graph.microsoft.com/Mail.ReadWrite "
     "https://graph.microsoft.com/Mail.Send https://graph.microsoft.com/User.Read"
 )
+READONLY_SCOPE = (
+    "offline_access https://graph.microsoft.com/Mail.Read "
+    "https://graph.microsoft.com/Calendars.Read https://graph.microsoft.com/User.Read"
+)
 LOOPBACK_PORT = 8766
 REPLY_WINDOW_DAYS = 7
 MAX_RETRY_AFTER_SECONDS = 10
@@ -104,6 +108,50 @@ def _save_token(data: dict):
 
 def _token_url(tenant: str) -> str:
     return f"{LOGIN}/{tenant or 'organizations'}/oauth2/v2.0/token"
+
+
+def get_auth_url(redirect_uri: str, state: str, client_id: str = "", tenant: str = "organizations") -> str:
+    """Return Microsoft identity platform OAuth2 authorization URL with read-only scopes."""
+    from urllib.parse import urlencode
+    base = f"{LOGIN}/{tenant or 'organizations'}/oauth2/v2.0/authorize"
+    params = {
+        "client_id": client_id,
+        "response_type": "code",
+        "redirect_uri": redirect_uri,
+        "response_mode": "query",
+        "scope": READONLY_SCOPE,
+        "state": state,
+    }
+    return f"{base}?{urlencode(params)}"
+
+
+async def exchange_code_for_token(
+    code: str,
+    redirect_uri: str,
+    client_id: str,
+    tenant: str = "organizations",
+    client_secret: str = "",
+) -> dict:
+    """Exchange authorization code for Microsoft Graph tokens."""
+    url = _token_url(tenant)
+    data = {
+        "client_id": client_id,
+        "grant_type": "authorization_code",
+        "code": code,
+        "redirect_uri": redirect_uri,
+        "scope": READONLY_SCOPE,
+    }
+    if client_secret:
+        data["client_secret"] = client_secret
+    async with httpx.AsyncClient(timeout=TIMEOUT) as client:
+        resp = await client.post(url, data=data)
+        if resp.status_code == 200:
+            token_json = resp.json()
+            _save_token(token_json)
+            return {"success": True, "token": token_json}
+        else:
+            return {"success": False, "status_code": resp.status_code, "error": resp.text}
+
 
 
 class MicrosoftProvider(MailProvider):

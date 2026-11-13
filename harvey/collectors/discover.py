@@ -1074,14 +1074,14 @@ class OpenStreetMap(DiscoveryProvider):
     # radius, so Overpass gets its own and asks the server for a matching
     # slice of execution time. Slow beats empty-handed, and a run that cannot
     # afford the wait stops on MAX_PROSPECTS_PER_CYCLE, not on a timeout.
-    HTTP_TIMEOUT = httpx.Timeout(connect=10.0, read=120.0, write=10.0,
-                                 pool=10.0)
-    SERVER_TIMEOUT = 90
+    HTTP_TIMEOUT = httpx.Timeout(connect=5.0, read=120.0, write=5.0, pool=5.0)
+    SERVER_TIMEOUT = 120
     # Statuses that say "this mirror, right now" rather than "this query":
     # throttling, a gateway that lost its backend, an overloaded instance, a
     # timed-out one. Every one of them is another mirror's problem to solve, so
     # walk on. A 400 (bad query) or 404 is ours and fails here and now.
     RETRY_STATUSES = frozenset({429, 500, 502, 503, 504})
+    enable_nominatim_fallback: bool = False
 
     # A friendly term maps to the OSM tags that actually carry those businesses.
     TAG_MAP = {
@@ -1172,6 +1172,50 @@ class OpenStreetMap(DiscoveryProvider):
             logger.warning("osm: %s is throttling or down (%s) — trying the "
                            "next mirror", endpoint, r.status_code)
         else:
+            if getattr(self, "enable_nominatim_fallback", False):
+                logger.warning("All Overpass mirrors busy; falling back to OpenStreetMap Nominatim search for %s", query.keyword())
+                try:
+                    nom_headers = {
+                        "User-Agent": "HarveySalesAgent/1.0 (contact: support@harvey-sales.local)",
+                        "Accept-Language": "en-US,en;q=0.9",
+                    }
+                    nom_query = f"{query.term} in {query.location}"
+                    r_nom = await client.get(
+                        "https://nominatim.openstreetmap.org/search",
+                        params={"q": nom_query, "format": "json", "addressdetails": 1, "limit": min(query.limit, 20)},
+                        headers=nom_headers,
+                        timeout=httpx.Timeout(15.0),
+                    )
+                    if r_nom.status_code == 200:
+                        nom_items = r_nom.json()
+                        out = []
+                        for item in nom_items:
+                            disp_name = item.get("display_name") or ""
+                            first_part = disp_name.split(",")[0].strip()
+                            raw_name = item.get("name") or first_part or "Dental Practice"
+                            osm_type = item.get("osm_type", "node")
+                            osm_id = item.get("osm_id", "")
+                            addr_dict = item.get("address") or {}
+                            city = addr_dict.get("city") or addr_dict.get("town") or addr_dict.get("county") or query.location
+                            state_name = addr_dict.get("state") or "Madhya Pradesh"
+                            full_loc = f"{city}, {state_name}"
+                            out.append(Business(
+                                name=raw_name,
+                                domain="",
+                                website="",
+                                phone="",
+                                address=disp_name,
+                                location=full_loc,
+                                category="amenity=dentist",
+                                has_website=False,
+                                external_id=f"osm:{osm_type}/{osm_id}",
+                                source_url=f"https://www.openstreetmap.org/{osm_type}/{osm_id}",
+                                provider=self.key,
+                            ))
+                        if out:
+                            return out
+                except Exception as nom_err:
+                    logger.warning("Nominatim fallback also failed: %s", nom_err)
             raise RuntimeError(
                 "Every public Overpass mirror is unavailable or throttling "
                 "right now. This is free volunteer infrastructure — wait a few "

@@ -839,7 +839,7 @@ function loadCurrentTab() {
 
     case 'usage': loadUsage(); break;
 
-    case 'settings': loadSettings(); loadSendingModeCard(); break;
+    case 'settings': loadSettings(); loadSendingModeCard(); if (typeof loadIntegrationMatrix === 'function') loadIntegrationMatrix(); break;
 
     case 'controls': loadHarveyStatus(); loadLogs(); break;
 
@@ -2654,11 +2654,97 @@ async function connectMockM365() {
     if (res && res.success) {
       showToast('Simulated M365 connected: ' + res.email, 'success');
       loadSettings();
+      if (typeof loadIntegrationMatrix === 'function') loadIntegrationMatrix();
     } else {
       showToast('Failed to connect mock M365.', 'error');
     }
   } catch (err) {
     showToast('Error: ' + err.message, 'error');
+  }
+}
+
+async function startM365OAuth() {
+  try {
+    showToast('Initializing Microsoft 365 OAuth sign-in...', 'info');
+    const res = await api('/api/microsoft/auth-url');
+    if (res && res.success && res.auth_url) {
+      window.location.href = res.auth_url;
+    } else {
+      showToast('OAuth error: ' + (res.error || 'Failed to generate authorization URL'), 'error');
+    }
+  } catch (err) {
+    showToast('Failed to start Microsoft sign-in: ' + err.message, 'error');
+  }
+}
+
+async function loadIntegrationMatrix() {
+  const container = document.getElementById('integration-matrix-grid');
+  if (!container) return;
+  try {
+    const res = await api('/api/integrations/status');
+    if (!res || !res.integrations) {
+      container.innerHTML = '<div style="padding:16px;color:var(--text-muted);">Failed to load integrations.</div>';
+      return;
+    }
+
+    const badgeStyles = {
+      connected: 'background:#10b981;color:#fff;',
+      mock: 'background:#6366f1;color:#fff;',
+      implemented_not_tested: 'background:#f59e0b;color:#fff;',
+      credentials_missing: 'background:#64748b;color:#fff;',
+      auth_failed: 'background:#ef4444;color:#fff;',
+      api_error: 'background:#dc2626;color:#fff;',
+      disabled: 'background:#475569;color:#cbd5e1;'
+    };
+
+    container.innerHTML = res.integrations.map(item => {
+      const bStyle = badgeStyles[item.status] || badgeStyles.credentials_missing;
+      const missingHtml = item.missing_config && item.missing_config.length > 0
+        ? `<div style="font-size:11px;color:#f87171;margin-top:4px;">Missing: <code>${item.missing_config.join(', ')}</code></div>`
+        : '';
+      const testedText = item.last_tested_at ? `Tested: ${new Date(item.last_tested_at).toLocaleTimeString()}` : 'Not tested';
+      const usageText = item.usage_count > 0 ? `Calls: ${item.usage_count}` : 'Calls: 0';
+      const costText = item.estimated_cost_usd > 0 ? ` &middot; $${item.estimated_cost_usd.toFixed(4)}` : '';
+      const isFreeBadge = item.is_free ? '<span style="font-size:10px;padding:1px 6px;border-radius:4px;background:#0ea5e9;color:#fff;margin-left:6px;">Free API</span>' : '';
+
+      return `
+        <div style="border:1px solid var(--border);border-radius:8px;padding:14px;background:var(--bg-card);display:flex;flex-direction:column;justify-content:space-between;gap:10px;">
+          <div>
+            <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:8px;">
+              <div style="font-weight:600;font-size:14px;">${escapeHtml(item.display_name)} ${isFreeBadge}</div>
+              <span style="font-size:11px;padding:2px 8px;border-radius:12px;font-weight:500;white-space:nowrap;${bStyle}">${escapeHtml(item.status_label)}</span>
+            </div>
+            <div style="font-size:11px;color:var(--text-muted);margin-top:4px;text-transform:uppercase;letter-spacing:0.5px;">Type: ${escapeHtml(item.type)}</div>
+            ${missingHtml}
+          </div>
+          <div style="display:flex;justify-content:space-between;align-items:center;padding-top:8px;border-top:1px solid var(--border);font-size:11px;color:var(--text-muted);">
+            <div>${usageText}${costText} &middot; <span title="${escapeHtml(item.last_tested_at || '')}">${testedText}</span></div>
+            <button class="btn btn-secondary btn-sm" style="padding:2px 8px;font-size:11px;" onclick="testIntegration('${escapeHtml(item.provider)}')">Test</button>
+          </div>
+        </div>
+      `;
+    }).join('');
+  } catch (err) {
+    container.innerHTML = `<div style="padding:16px;color:#ef4444;">Error loading integration status: ${escapeHtml(err.message)}</div>`;
+  }
+}
+
+async function testIntegration(provider) {
+  try {
+    showToast(`Testing connection for ${provider}...`, 'info');
+    const res = await api('/api/integrations/test-connection', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({provider: provider})
+    });
+    if (res && res.success) {
+      showToast(`${provider}: ${res.message} (${res.latency_ms}ms)`, 'success');
+    } else {
+      showToast(`${provider} test failed: ${res?.error || res?.message || 'Error'}`, 'warning');
+    }
+    loadIntegrationMatrix();
+  } catch (err) {
+    showToast(`Test error for ${provider}: ${err.message}`, 'error');
   }
 }
 

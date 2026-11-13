@@ -668,6 +668,89 @@ MIGRATIONS: list[str] = [
     UPDATE prospects SET company_id = NULL WHERE company_id = '';
     UPDATE conversations SET prospect_id = NULL WHERE prospect_id = '';
     """,
+    # ── v23: Unified integrations management, provider audit logs, discovery runs, and research cache ──
+    """
+    CREATE TABLE IF NOT EXISTS integrations (
+        provider TEXT PRIMARY KEY,
+        display_name TEXT NOT NULL,
+        integration_type TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'credentials_missing',
+        is_enabled INTEGER NOT NULL DEFAULT 1,
+        last_tested_at TEXT,
+        last_test_success INTEGER,
+        last_error TEXT,
+        usage_count INTEGER NOT NULL DEFAULT 0,
+        estimated_cost_usd REAL NOT NULL DEFAULT 0.0,
+        config_json TEXT NOT NULL DEFAULT '{}',
+        created_at TEXT NOT NULL DEFAULT (datetime('now')),
+        updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+
+    INSERT OR IGNORE INTO integrations (provider, display_name, integration_type, status) VALUES
+    ('dataforseo', 'DataForSEO', 'discovery', 'credentials_missing'),
+    ('serper', 'Serper', 'discovery', 'credentials_missing'),
+    ('tinyfish', 'TinyFish', 'discovery', 'credentials_missing'),
+    ('scavio', 'Scavio', 'discovery', 'credentials_missing'),
+    ('openstreetmap', 'OpenStreetMap / Overpass', 'discovery', 'connected'),
+    ('zerobounce', 'ZeroBounce', 'email_verification', 'credentials_missing'),
+    ('hunter', 'Hunter.io', 'email_verification', 'credentials_missing'),
+    ('reoon', 'Reoon', 'email_verification', 'credentials_missing'),
+    ('gmail', 'Gmail OAuth', 'mail', 'credentials_missing'),
+    ('microsoft365', 'Microsoft 365', 'mail', 'credentials_missing'),
+    ('calcom', 'Cal.com', 'calendar', 'credentials_missing'),
+    ('calendly', 'Calendly', 'calendar', 'credentials_missing'),
+    ('ollama', 'Ollama Local LLM', 'ai', 'connected'),
+    ('chromadb', 'ChromaDB Vector Store', 'ai', 'connected');
+
+    CREATE TABLE IF NOT EXISTS provider_logs (
+        id TEXT PRIMARY KEY,
+        provider TEXT NOT NULL,
+        endpoint TEXT,
+        method TEXT NOT NULL DEFAULT 'GET',
+        status_code INTEGER,
+        success INTEGER NOT NULL DEFAULT 0,
+        request_summary TEXT,
+        response_summary TEXT,
+        latency_ms INTEGER,
+        cost_usd REAL DEFAULT 0.0,
+        error_message TEXT,
+        created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+    CREATE INDEX IF NOT EXISTS idx_provider_logs_provider ON provider_logs(provider);
+    CREATE INDEX IF NOT EXISTS idx_provider_logs_created ON provider_logs(created_at);
+
+    CREATE TABLE IF NOT EXISTS discovery_runs (
+        id TEXT PRIMARY KEY,
+        profile_id TEXT,
+        provider TEXT NOT NULL,
+        geography TEXT NOT NULL,
+        industry TEXT NOT NULL,
+        keywords TEXT,
+        total_found INTEGER NOT NULL DEFAULT 0,
+        new_leads INTEGER NOT NULL DEFAULT 0,
+        duplicates_skipped INTEGER NOT NULL DEFAULT 0,
+        estimated_cost_usd REAL NOT NULL DEFAULT 0.0,
+        actual_cost_usd REAL NOT NULL DEFAULT 0.0,
+        status TEXT NOT NULL DEFAULT 'running',
+        error_message TEXT,
+        started_at TEXT NOT NULL DEFAULT (datetime('now')),
+        completed_at TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_discovery_runs_provider ON discovery_runs(provider);
+    CREATE INDEX IF NOT EXISTS idx_discovery_runs_profile ON discovery_runs(profile_id);
+
+    CREATE TABLE IF NOT EXISTS research_cache (
+        domain TEXT PRIMARY KEY,
+        company_name TEXT,
+        research_json TEXT NOT NULL DEFAULT '{}',
+        sources_json TEXT NOT NULL DEFAULT '[]',
+        confidence REAL NOT NULL DEFAULT 0.0,
+        is_sample INTEGER NOT NULL DEFAULT 0,
+        researched_at TEXT NOT NULL DEFAULT (datetime('now')),
+        expires_at TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_research_cache_domain ON research_cache(domain);
+    """,
 ]
 
 CRM_PIPELINE_STAGES: list[str] = [
@@ -4104,3 +4187,203 @@ class StateManager:
             "outbox_id": outbox_id,
         })
         return True
+
+    # ── Migration 23: Integrations & Provider Audits ──
+
+    async def log_provider_request(
+        self,
+        provider: str,
+        endpoint: str = "",
+        method: str = "GET",
+        status_code: int = 200,
+        success: bool = True,
+        request_summary: str = "",
+        response_summary: str = "",
+        latency_ms: int = 0,
+        cost_usd: float = 0.0,
+        error_message: str = "",
+    ) -> str:
+        """Log an external provider API call for usage and cost audit."""
+        import uuid
+        req_id = f"plog_{uuid.uuid4().hex[:12]}"
+        now_iso = _utcnow().isoformat()
+        try:
+            async with self._connect() as db:
+                await db.execute(
+                    """
+                    INSERT INTO provider_logs (
+                        id, provider, endpoint, method, status_code, success,
+                        request_summary, response_summary, latency_ms, cost_usd,
+                        error_message, created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        req_id, provider, endpoint, method, status_code,
+                        1 if success else 0, request_summary, response_summary,
+                        latency_ms, cost_usd, error_message, now_iso
+                    ),
+                )
+                await db.execute(
+                    """
+                    UPDATE integrations
+                    SET usage_count = usage_count + 1,
+                        estimated_cost_usd = estimated_cost_usd + ?,
+                        last_tested_at = ?,
+                        last_test_success = ?,
+                        last_error = ?,
+                        updated_at = ?
+                    WHERE provider = ?
+                    """,
+                    (cost_usd, now_iso, 1 if success else 0, error_message or None, now_iso, provider)
+                )
+                await db.commit()
+        except Exception as e:
+            logger.warning(f"Failed to log provider request for {provider}: {e}")
+        return req_id
+
+    async def update_integration_status(
+        self,
+        provider: str,
+        status: str,
+        last_error: str | None = None,
+        increment_usage: bool = False,
+        cost: float = 0.0,
+    ) -> bool:
+        """Update provider connection status in integrations table."""
+        now_iso = _utcnow().isoformat()
+        try:
+            async with self._connect() as db:
+                if increment_usage:
+                    await db.execute(
+                        """
+                        UPDATE integrations
+                        SET status = ?, last_error = ?,
+                            usage_count = usage_count + 1,
+                            estimated_cost_usd = estimated_cost_usd + ?,
+                            last_tested_at = ?,
+                            last_test_success = ?,
+                            updated_at = ?
+                        WHERE provider = ?
+                        """,
+                        (status, last_error, cost, now_iso, 1 if not last_error else 0, now_iso, provider)
+                    )
+                else:
+                    await db.execute(
+                        """
+                        UPDATE integrations
+                        SET status = ?, last_error = ?,
+                            last_tested_at = ?,
+                            last_test_success = ?,
+                            updated_at = ?
+                        WHERE provider = ?
+                        """,
+                        (status, last_error, now_iso, 1 if not last_error else 0, now_iso, provider)
+                    )
+                await db.commit()
+                return True
+        except Exception as e:
+            logger.warning(f"Failed to update integration status for {provider}: {e}")
+            return False
+
+    async def get_integration_statuses(self) -> list[dict[str, Any]]:
+        """Return all provider rows from integrations table."""
+        try:
+            async with self._connect() as db:
+                db.row_factory = aiosqlite.Row
+                async with db.execute("SELECT * FROM integrations ORDER BY integration_type, display_name") as cur:
+                    rows = await cur.fetchall()
+                    return [dict(r) for r in rows]
+        except Exception as e:
+            logger.warning(f"Failed to fetch integration statuses: {e}")
+            return []
+
+    async def save_discovery_run(self, run_dict: dict[str, Any]) -> str:
+        """Insert or update a discovery run record."""
+        import uuid
+        run_id = run_dict.get("id") or f"drun_{uuid.uuid4().hex[:12]}"
+        now_iso = _utcnow().isoformat()
+        async with self._connect() as db:
+            await db.execute(
+                """
+                INSERT INTO discovery_runs (
+                    id, profile_id, provider, geography, industry, keywords,
+                    total_found, new_leads, duplicates_skipped,
+                    estimated_cost_usd, actual_cost_usd, status,
+                    error_message, started_at, completed_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET
+                    total_found = excluded.total_found,
+                    new_leads = excluded.new_leads,
+                    duplicates_skipped = excluded.duplicates_skipped,
+                    actual_cost_usd = excluded.actual_cost_usd,
+                    status = excluded.status,
+                    error_message = excluded.error_message,
+                    completed_at = excluded.completed_at
+                """,
+                (
+                    run_id,
+                    run_dict.get("profile_id", ""),
+                    run_dict.get("provider", ""),
+                    run_dict.get("geography", ""),
+                    run_dict.get("industry", ""),
+                    run_dict.get("keywords", ""),
+                    run_dict.get("total_found", 0),
+                    run_dict.get("new_leads", 0),
+                    run_dict.get("duplicates_skipped", 0),
+                    run_dict.get("estimated_cost_usd", 0.0),
+                    run_dict.get("actual_cost_usd", 0.0),
+                    run_dict.get("status", "complete"),
+                    run_dict.get("error_message"),
+                    run_dict.get("started_at", now_iso),
+                    run_dict.get("completed_at", now_iso),
+                )
+            )
+            await db.commit()
+        return run_id
+
+    async def save_research_cache(
+        self,
+        domain: str,
+        company_name: str,
+        research_json: str,
+        sources_json: str,
+        confidence: float = 0.0,
+        is_sample: bool = False,
+    ) -> bool:
+        """Cache research facts for a domain to avoid duplicate web scrapes."""
+        now_iso = _utcnow().isoformat()
+        clean_domain = domain.lower().strip()
+        async with self._connect() as db:
+            await db.execute(
+                """
+                INSERT OR REPLACE INTO research_cache (
+                    domain, company_name, research_json, sources_json,
+                    confidence, is_sample, researched_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    clean_domain,
+                    company_name,
+                    research_json,
+                    sources_json,
+                    confidence,
+                    1 if is_sample else 0,
+                    now_iso,
+                )
+            )
+            await db.commit()
+        return True
+
+    async def get_research_cache(self, domain: str) -> dict[str, Any] | None:
+        """Retrieve cached research facts for a domain if available."""
+        clean_domain = domain.lower().strip()
+        async with self._connect() as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(
+                "SELECT * FROM research_cache WHERE domain = ?", (clean_domain,)
+            ) as cur:
+                row = await cur.fetchone()
+                if row:
+                    return dict(row)
+        return None
+
