@@ -141,3 +141,4 @@ To complete remote cloud deployment to GitHub or a cloud hosting provider, the o
 2. The platform will automatically detect [Dockerfile](file:///C:/Users/aneka/Desktop/harvey/Dockerfile).
 3. Set environment variable `OLLAMA_BASE_URL` pointing to your hosted Ollama or OpenAI-compatible endpoint.
 4. Mount a persistent disk to `/app/data`.
+

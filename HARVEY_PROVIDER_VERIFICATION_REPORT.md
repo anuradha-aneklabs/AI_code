@@ -16,7 +16,7 @@ All claims in this report are verified against real runtime socket probes, live 
 
 ```mermaid
 pie title Harvey Provider Verification Status
-    "Live Verified (Network / Local Socket)" : 5
+    "Live Verified (Network / Local Socket)" : 6
     "Simulated / Sandbox Active" : 1
     "Credential Blocked (Code-Complete)" : 10
 ```

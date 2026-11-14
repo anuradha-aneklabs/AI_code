@@ -4503,6 +4503,20 @@ async def get_all_integrations_status():
             "last_error": db_statuses.get("openstreetmap", {}).get("last_error"),
         },
         {
+            "provider": "nominatim",
+            "display_name": "Nominatim Geocoding",
+            "type": "discovery",
+            "status": "connected",
+            "status_label": "Connected & Verified",
+            "is_free": True,
+            "can_test": True,
+            "missing_config": [],
+            "usage_count": db_statuses.get("nominatim", {}).get("usage_count", 0),
+            "estimated_cost_usd": db_statuses.get("nominatim", {}).get("estimated_cost_usd", 0.0),
+            "last_tested_at": db_statuses.get("nominatim", {}).get("last_tested_at"),
+            "last_error": db_statuses.get("nominatim", {}).get("last_error"),
+        },
+        {
             "provider": "ollama",
             "display_name": "Ollama Local LLM",
             "type": "ai",
@@ -4705,17 +4719,18 @@ async def test_integration_connection(request: Request):
     message = ""
     error_detail = ""
 
-    if provider == "openstreetmap":
+    if provider in ("openstreetmap", "nominatim"):
+        display_name = "Nominatim" if provider == "nominatim" else "OpenStreetMap / Nominatim"
         try:
             async with httpx.AsyncClient(timeout=8.0) as client:
                 r = await client.get("https://nominatim.openstreetmap.org/status.php", headers={"User-Agent": "Harvey-SalesAgent/1.0"})
                 latency_ms = int((time.time() - start_time) * 1000)
                 if r.status_code == 200:
                     success = True
-                    message = "OpenStreetMap / Nominatim operational (HTTP 200 OK)"
+                    message = f"{display_name} operational (HTTP 200 OK)"
                 else:
                     error_detail = f"Status code {r.status_code}"
-                    message = f"Overpass status check returned HTTP {r.status_code}"
+                    message = f"{display_name} status check returned HTTP {r.status_code}"
         except Exception as e:
             latency_ms = int((time.time() - start_time) * 1000)
             error_detail = str(e)

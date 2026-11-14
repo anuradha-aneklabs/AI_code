@@ -87,7 +87,7 @@ def _load_token() -> dict | None:
     try:
         if TOKEN_FILE.is_file():
             data = json.loads(TOKEN_FILE.read_text(encoding="utf-8"))
-            if isinstance(data, dict) and data.get("refresh_token"):
+            if isinstance(data, dict) and (data.get("refresh_token") or data.get("is_mock")):
                 return data
     except (OSError, json.JSONDecodeError) as e:
         logger.warning(f"Could not read Microsoft token file: {e}")

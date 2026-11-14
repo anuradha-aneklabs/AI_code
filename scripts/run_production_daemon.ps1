@@ -1,4 +1,4 @@
-﻿# Harvey AI Sales Agent — Production Windows Daemon Runner
+# Harvey AI Sales Agent — Production Windows Daemon Runner
 # Runs the dashboard server on port 5555 and ensures automatic restart on unexpected exit.
 
 $ErrorActionPreference = "Stop"
@@ -30,3 +30,4 @@ while ($true) {
     Write-Host "[$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')] Harvey exited with code $ExitCode. Restarting in 5 seconds..." -ForegroundColor Red
     Start-Sleep -Seconds 5
 }
+
