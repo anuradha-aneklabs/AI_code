@@ -128,3 +128,4 @@ Regardless of profile or industry selected, Harvey strictly enforces non-negotia
 3. **Strict Zero-Send Invariant:** `sent_count = 0` (strictly enforced in database outbox and runtime state).
 4. **Draft Staging Isolation:** When a campaign is staged, only Step 1 drafts are placed into the Outbox with `status = "pending_review"`. Step 2 and Step 3 remain held in the campaign sequence for future scheduling and are never transmitted automatically.
 5. **Pilot Draft Preservation:** All 4 original historical pilot evaluation drafts (`a02fed19ec8d`, `36dfa015198c`, `3be7a27f3620`, `fad4e4984339`) remain intact in SQLite.
+

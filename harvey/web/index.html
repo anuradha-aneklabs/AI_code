@@ -757,7 +757,30 @@
         </div>
         <div class="form-group" style="flex:1;min-width:180px;">
           <label class="form-label" for="profile-editor-industry">Target Industry *</label>
-          <input class="form-input" id="profile-editor-industry" placeholder="e.g. Renewable Energy / Solar">
+          <input class="form-input" id="profile-editor-industry" list="supported-industries-list" placeholder="e.g. IT, Software, SaaS and AI">
+          <datalist id="supported-industries-list">
+            <option value="IT, Software, SaaS and AI">
+            <option value="Legal Services and Law Firms">
+            <option value="Healthcare, Hospitals, Clinics and Diagnostics">
+            <option value="Real Estate and Property">
+            <option value="Manufacturing and Industrial">
+            <option value="Finance, Accounting and Insurance">
+            <option value="Education and EdTech">
+            <option value="E-commerce and Retail">
+            <option value="Hospitality, Hotels and Restaurants">
+            <option value="Logistics and Transportation">
+            <option value="Construction and Infrastructure">
+            <option value="Automotive">
+            <option value="Agriculture">
+            <option value="Recruitment and HR">
+            <option value="Marketing and Consulting Agencies">
+            <option value="Professional and Business Services">
+            <option value="CleanTech / Renewable Energy">
+          </datalist>
+        </div>
+        <div class="form-group" style="flex:1;min-width:180px;">
+          <label class="form-label" for="profile-editor-subcategory">Subcategory / Vertical</label>
+          <input class="form-input" id="profile-editor-subcategory" placeholder="e.g. Enterprise Cloud, Commercial Office, Precision CNC">
         </div>
       </div>
       <div class="form-row" style="margin-bottom:8px;">
@@ -810,7 +833,7 @@
       <div class="form-row" style="margin-bottom:8px;">
         <div class="form-group" style="flex:1;min-width:160px;">
           <label class="form-label" for="search-industry">Industry / Sector</label>
-          <input class="form-input" id="search-industry" placeholder="e.g. CleanTech, Healthcare, B2B SaaS">
+          <input class="form-input" id="search-industry" list="supported-industries-list" placeholder="e.g. IT, Software, SaaS and AI">
         </div>
         <div class="form-group" style="flex:1;min-width:160px;">
           <label class="form-label" for="search-location">Location / Geography</label>

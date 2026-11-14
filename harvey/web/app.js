@@ -5721,7 +5721,10 @@ async function loadBusinessProfiles() {
         seen.add(key);
         return true;
       });
-      if (!_activeProfileId || !_businessProfiles.some(p => p.id === _activeProfileId)) {
+      const savedProfileId = localStorage.getItem('harvey_active_profile_id');
+      if (savedProfileId && _businessProfiles.some(p => p.id === savedProfileId)) {
+        _activeProfileId = savedProfileId;
+      } else if (!_activeProfileId || !_businessProfiles.some(p => p.id === _activeProfileId)) {
         const def = _businessProfiles.find(p => p.is_default) || _businessProfiles[0];
         _activeProfileId = def.id;
       }
@@ -5765,6 +5768,7 @@ function renderProfileCriteriaSummary() {
 
   container.innerHTML =
     '<span class="badge t-info" style="font-size:11px;">Industry: ' + escHtml(p.industry) + '</span>' +
+    (p.subcategory ? '<span class="badge t-waiting" style="font-size:11px;">Sub: ' + escHtml(p.subcategory) + '</span>' : '') +
     '<span class="badge t-good" style="font-size:11px;">Target Geo: ' + escHtml(p.geography || 'Global') + ' (' + escHtml(scopeLabel) + ')</span>' +
     '<span class="badge t-waiting" style="font-size:11px;">Team: ' + escHtml(p.company_size || 'SMB') + '</span>' +
     '<span class="badge t-info" style="font-size:11px;">Titles: ' + escHtml(titles) + '</span>' +
@@ -5786,6 +5790,8 @@ function toggleProfileEditor(show, isEdit) {
     if (nameEl) nameEl.value = '';
     const indEl = document.getElementById('profile-editor-industry');
     if (indEl) indEl.value = '';
+    const subEl = document.getElementById('profile-editor-subcategory');
+    if (subEl) subEl.value = '';
     const geoEl = document.getElementById('profile-editor-geo');
     if (geoEl) geoEl.value = '';
     const scopeEl = document.getElementById('profile-editor-geo-scope');
@@ -5818,6 +5824,8 @@ function openEditProfile() {
   if (nameEl) nameEl.value = p.name || '';
   const indEl = document.getElementById('profile-editor-industry');
   if (indEl) indEl.value = p.industry || '';
+  const subEl = document.getElementById('profile-editor-subcategory');
+  if (subEl) subEl.value = p.subcategory || '';
   const geoEl = document.getElementById('profile-editor-geo');
   if (geoEl) geoEl.value = p.geography || '';
   const scopeEl = document.getElementById('profile-editor-geo-scope');
@@ -5843,6 +5851,8 @@ async function saveProfileFromEditor() {
   }
   const idEl = document.getElementById('profile-editor-id');
   const pid = idEl ? idEl.value.trim() : '';
+  const subEl = document.getElementById('profile-editor-subcategory');
+  const subcategory = subEl ? subEl.value.trim() : '';
   const geoEl = document.getElementById('profile-editor-geo');
   const geo = geoEl ? geoEl.value.trim() : '';
   const scopeEl = document.getElementById('profile-editor-geo-scope');
@@ -5860,6 +5870,7 @@ async function saveProfileFromEditor() {
   const payload = {
     name: name,
     industry: industry,
+    subcategory: subcategory,
     geography: geo,
     geography_scope: geoScope,
     company_size: size,
@@ -5879,6 +5890,7 @@ async function saveProfileFromEditor() {
     showToast('Business profile saved successfully.', 'good');
     toggleProfileEditor(false);
     _activeProfileId = res.profile.id;
+    try { localStorage.setItem('harvey_active_profile_id', res.profile.id); } catch (e) {}
     await loadBusinessProfiles();
     await loadDiscoveredLeads();
   } else {
@@ -5901,6 +5913,7 @@ async function deleteCurrentProfile() {
   if (res && res.success) {
     showToast('Business profile deleted.', 'good');
     _activeProfileId = '';
+    try { localStorage.removeItem('harvey_active_profile_id'); } catch (e) {}
     await loadBusinessProfiles();
     await loadDiscoveredLeads();
   } else {
@@ -5910,6 +5923,7 @@ async function deleteCurrentProfile() {
 
 async function onBusinessProfileChange(profileId) {
   _activeProfileId = profileId;
+  try { localStorage.setItem('harvey_active_profile_id', profileId); } catch (e) {}
   renderProfileCriteriaSummary();
   await loadDiscoveredLeads();
 }
@@ -6074,6 +6088,7 @@ function renderDiscoveredLeads(leads) {
           '</div>' +
         '</div>' +
         '<div class="lead-card-badges">' +
+          (l.is_sample ? '<span class="badge t-waiting" style="font-size:10px;font-weight:600;" title="Sample research fixture for offline evaluation">SAMPLE FIXTURE</span>' : '<span class="badge t-good" style="font-size:10px;font-weight:600;" title="Live external verified discovery lead">LIVE VERIFIED</span>') +
           candBadge +
           bantBadge +
           '<span class="badge ' + badgeTone + '" style="font-weight:600;">' + escHtml(l.score) + ' &middot; ' + escHtml(l.tier || 'Scored') + '</span>' +

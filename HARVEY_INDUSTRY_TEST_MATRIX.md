@@ -113,3 +113,4 @@ All 10 verticals were validated against local ChromaDB semantic search using cos
 - **Approval Gate Setting:** `config.channels.email.require_approval = True` strictly enforced.
 - **Outbox Draft Isolation:** All 10 staged Step 1 outreach drafts are persisted in `outbox` with `status = 'pending_review'`.
 - **Scheduled Steps 2 & 3:** Held safely in campaign sequence definitions, requiring operator action before any scheduling.
+
