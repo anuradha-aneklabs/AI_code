@@ -165,3 +165,4 @@ Across all live, simulated, and configured integrations:
 2. **Strict Read-Only Scopes:** Mail and calendar APIs request read-only permissions exclusively.
 3. **No External Calendar Edits:** Meeting links and available slots are read-only; no calendar invites or cancellations are generated.
 4. **Credential Protection:** Tokens and credentials stored strictly in `.env` and `data/` directories, both ignored by Git version control.
+

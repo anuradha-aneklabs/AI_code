@@ -24,7 +24,7 @@ class OllamaProvider(AIProvider):
     is_paid = False
     requires_key = False
     env_key = "OLLAMA_BASE_URL"
-    default_model = "llama3.2"
+    default_model = "qwen2.5:1.5b"
 
     def __init__(self, config: Optional[dict[str, Any]] = None, env: Optional[dict[str, str]] = None):
         super().__init__(config, env)
