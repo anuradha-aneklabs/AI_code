@@ -1,0 +1,42 @@
+version: "3.8"
+
+services:
+  harvey:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        HARVEY_UID: ${HARVEY_UID:-1000}
+        HARVEY_GID: ${HARVEY_GID:-1000}
+    container_name: harvey-sales-agent
+    restart: unless-stopped
+    init: true
+    ports:
+      # Expose only on loopback for security (use reverse proxy or SSH tunnel for remote access)
+      - "127.0.0.1:5555:5555"
+    environment:
+      - PYTHONUNBUFFERED=1
+      - OLLAMA_BASE_URL=${OLLAMA_BASE_URL:-http://host.docker.internal:11434}
+    volumes:
+      # Persistent application data and database
+      - harvey_data:/app/data
+      # Mount configuration
+      - ./harvey.yaml:/app/harvey.yaml:ro
+      - ./.env:/app/.env:ro
+      - ./prompts:/app/prompts:ro
+      - ./skills:/app/skills:ro
+    healthcheck:
+      test: ["CMD", "python", "-c", "import socket; socket.create_connection(('127.0.0.1', 5555), timeout=5).close()"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "20m"
+        max-file: "5"
+
+volumes:
+  harvey_data:
+    driver: local

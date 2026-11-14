@@ -176,3 +176,31 @@ Backups are archived into `data/backups/harvey_backup_YYYYMMDD_HHMMSS.db`.
 2. **Never Request Write Scopes:** Only authorize `gmail.readonly` and Microsoft `Mail.Read`.
 3. **Never Commit Secrets:** `.env` and `data/*token.json` are git-ignored and must never be committed.
 4. **Preserve Pilot Records:** Do not alter the 4 pilot drafts (`36dfa015198c`, `3be7a27f3620`, `a02fed19ec8d`, `fad4e4984339`).
+
+---
+
+## 8. Production Deployment Options
+
+### 8.1 Docker Container Deployment
+Use the production compose specification:
+```bash
+docker compose -f docker-compose.prod.yml up -d
+```
+Access the loopback port via an authenticated reverse proxy (e.g. Caddy/Nginx) or SSH tunnel:
+```bash
+ssh -L 5555:127.0.0.1:5555 user@your-server
+```
+
+### 8.2 Linux VPS Systemd Service
+Copy the systemd configuration file to your systemd directory:
+```bash
+sudo cp harvey.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now harvey
+```
+
+### 8.3 Windows Server Background Supervisor
+Run the PowerShell supervisor daemon:
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\run_production_daemon.ps1
+```

@@ -1,0 +1,19 @@
+[Unit]
+Description=Harvey AI Sales Agent Daemon & Dashboard
+After=network.target
+
+[Service]
+Type=simple
+User=harvey
+Group=harvey
+WorkingDirectory=/opt/harvey
+ExecStart=/opt/harvey/.venv/bin/python -m harvey.cli dashboard --port 5555
+Restart=always
+RestartSec=5
+KillMode=process
+Environment=PYTHONUNBUFFERED=1
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

@@ -130,11 +130,16 @@ graph TD
    - Added `CAL_API_KEY` to the `calcom` provider key validation list.
 4. Comprehensive Project Reports Generated:
    - [HARVEY_FINAL_COMPLETION_REPORT.md](file:///C:/Users/aneka/Desktop/harvey/HARVEY_FINAL_COMPLETION_REPORT.md)
+   - [HARVEY_DEPLOYMENT_VERIFICATION_REPORT.md](file:///C:/Users/aneka/Desktop/harvey/HARVEY_DEPLOYMENT_VERIFICATION_REPORT.md)
    - [HARVEY_FEATURE_COMPLETION_MATRIX.md](file:///C:/Users/aneka/Desktop/harvey/HARVEY_FEATURE_COMPLETION_MATRIX.md)
    - [HARVEY_PROVIDER_VERIFICATION_REPORT.md](file:///C:/Users/aneka/Desktop/harvey/HARVEY_PROVIDER_VERIFICATION_REPORT.md)
    - [HARVEY_TEST_AND_REGRESSION_REPORT.md](file:///C:/Users/aneka/Desktop/harvey/HARVEY_TEST_AND_REGRESSION_REPORT.md)
    - [HARVEY_SAFETY_AND_SECURITY_REPORT.md](file:///C:/Users/aneka/Desktop/harvey/HARVEY_SAFETY_AND_SECURITY_REPORT.md)
    - [HARVEY_SETUP_AND_RUN_GUIDE.md](file:///C:/Users/aneka/Desktop/harvey/HARVEY_SETUP_AND_RUN_GUIDE.md)
+5. Production Deployment Assets Configured:
+   - [docker-compose.prod.yml](file:///C:/Users/aneka/Desktop/harvey/docker-compose.prod.yml)
+   - [harvey.service](file:///C:/Users/aneka/Desktop/harvey/harvey.service)
+   - [scripts/run_production_daemon.ps1](file:///C:/Users/aneka/Desktop/harvey/scripts/run_production_daemon.ps1)
 
 ---
 
