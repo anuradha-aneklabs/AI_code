@@ -262,41 +262,113 @@ class CampaignGenerator:
         ind_str = f"{profile.get('industry', '')} {company.industry if company else ''}".lower()
         loc_phrase = f" in {location.split(',')[0].strip()}" if location else ""
 
-        # Determine industry-specific messaging
-        if "dent" in ind_str or "oral" in ind_str:
-            hook = f"I came across {comp_name}{loc_phrase} and noticed your work in specialized dental care."
-            pain = "Many dental clinics encounter challenges coordinating multi-step patient follow-ups without manual front-desk overhead."
-            solution = f"We built {product_name} to assist practices in automating consultation scheduling and inquiry correspondence while keeping full human approval over every draft."
-            followup_val = "Practices using grounded correspondence support typically reduce appointment drop-off while ensuring every communication remains verifiable."
-        elif "clinic" in ind_str or "health" in ind_str or "medic" in ind_str:
-            hook = f"I came across {comp_name}{loc_phrase} and noticed your work in specialized healthcare services."
-            pain = "Many clinics encounter challenges coordinating patient consultation follow-ups and specialist referrals without administrative burden."
-            solution = f"We built {product_name} to assist clinical teams in streamlining consultation correspondence while keeping local privacy and operator review gates."
-            followup_val = "Clinics using grounded correspondence workflows improve consultation show rates while ensuring all communications remain compliant and verified."
-        elif "saas" in ind_str or "software" in ind_str or "tech" in ind_str:
+        # Extract custom dynamic fields from profile if available
+        profile_pain = ""
+        if isinstance(profile.get("pain_points"), list) and profile.get("pain_points"):
+            profile_pain = str(profile["pain_points"][0])
+        elif isinstance(profile.get("pain_points"), str) and profile.get("pain_points"):
+            profile_pain = profile["pain_points"]
+
+        # Determine industry-specific messaging (multi-industry universal coverage)
+        if "educat" in ind_str or "edtech" in ind_str or "school" in ind_str or "universit" in ind_str or "college" in ind_str or "academ" in ind_str:
+            hook = f"I came across {comp_name}{loc_phrase} and have been following your innovative academic programs."
+            pain = profile_pain or "Educational institutions and EdTech providers often face high enrollment drop-off when prospective student and enterprise learner inquiries are not answered immediately."
+            solution = f"We built {product_name} to qualify prospective student and corporate enrollment inquiries, coordinate admissions consultations, and stage communications with admissions review."
+            followup_val = "Admissions teams using automated inquiry workflows increase enrollment conversion rates while maintaining academic guidance standards."
+        elif "saas" in ind_str or "software" in ind_str or "ai" in ind_str or ("tech" in ind_str and "clean" not in ind_str):
             hook = f"I came across {comp_name}{loc_phrase} and have been following your growth in the B2B tech space."
-            pain = "Scaling software teams often encounter bottlenecks coordinating multi-touch outbound correspondence and keeping outreach grounded in verified account signals."
+            pain = profile_pain or "Scaling software teams often encounter bottlenecks coordinating multi-touch outbound correspondence and keeping outreach grounded in verified account signals."
             solution = f"We built {product_name} to help revenue and growth teams automate personalized prospect research and outbound correspondence while maintaining strict human approval before any message is sent."
             followup_val = "SaaS teams using grounded sales agents accelerate pipeline velocity and SDR productivity without sacrificing messaging quality or control."
         elif "legal" in ind_str or "law" in ind_str or "attorney" in ind_str or "counsel" in ind_str:
             hook = f"I came across {comp_name}{loc_phrase} and noticed your firm's strong reputation in commercial legal advisory."
-            pain = "Law practices often face friction managing prospective client intake triage and consultation scheduling while preserving strict client confidentiality."
+            pain = profile_pain or "Law practices often face friction managing prospective client intake triage and consultation scheduling while preserving strict client confidentiality."
             solution = f"We built {product_name} to streamline prospective client inquiry qualification and initial correspondence with local-first data privacy and mandatory partner review."
             followup_val = "Firms using automated intake workflows improve responsiveness to high-value prospective matters while keeping partners in complete control of every staged message."
-        elif "account" in ind_str or "cpa" in ind_str or "tax" in ind_str or "finance" in ind_str or "financial" in ind_str:
+        elif "real estate" in ind_str or "property" in ind_str or "realt" in ind_str or "brokerage" in ind_str:
+            hook = f"I came across {comp_name}{loc_phrase} and noticed your prime commercial and residential property portfolio."
+            pain = profile_pain or "Real estate firms often lose high-intent buyers and corporate tenants when prospective deal inquiries sit unqualified in unmonitored inboxes."
+            solution = f"We built {product_name} to qualify property buyer and tenant inquiries instantly, coordinate viewing consultations, and stage every reply for broker review."
+            followup_val = "Brokerages using automated inquiry triage convert more inbound inquiries into completed lease and purchase transactions."
+        elif "manufactur" in ind_str or "industrial" in ind_str or "oem" in ind_str or "machin" in ind_str:
+            hook = f"I came across {comp_name}{loc_phrase} and reviewed your precision manufacturing capabilities."
+            pain = profile_pain or "Industrial manufacturers struggle to follow up on complex custom fabrication bids and contract manufacturing inquiries across long sales cycles."
+            solution = f"We built {product_name} to qualify industrial RFP inquiries, engage supply chain procurement leaders, and stage tailored engineering follow-ups with full manager sign-off."
+            followup_val = "Manufacturing teams using structured correspondence accelerate quote turnaround and secure high-value industrial supply agreements."
+        elif "account" in ind_str or "cpa" in ind_str or "tax" in ind_str or "finance" in ind_str or "financial" in ind_str or "insurance" in ind_str:
             hook = f"I came across {comp_name}{loc_phrase} and noticed your practice's strategic financial and accounting services."
-            pain = "Accounting and advisory firms frequently experience heavy administrative follow-up overhead during new client onboarding and seasonal intake cycles."
+            pain = profile_pain or "Accounting and advisory firms frequently experience heavy administrative follow-up overhead during new client onboarding and seasonal intake cycles."
             solution = f"We built {product_name} to automate prospective client correspondence and consultation scheduling while keeping full operator approval over every communication."
             followup_val = "Practices using grounded correspondence workflows reduce onboarding delays and free senior advisors to focus on strategic client work."
-        elif "hvac" in ind_str or "home service" in ind_str or "facility" in ind_str or "contractor" in ind_str or "commercial service" in ind_str:
+        elif "hotel" in ind_str or "hospitality" in ind_str or "resort" in ind_str or "restaurant" in ind_str:
+            hook = f"I came across {comp_name}{loc_phrase} and admired your premier hospitality guest experience."
+            pain = profile_pain or "Hospitality operators often experience delays responding to high-margin corporate group bookings, private event inquiries, and conference RFP requests."
+            solution = f"We built {product_name} to triage corporate event and banquet inquiries rapidly, coordinate site tours, and stage personalized proposals for director sign-off."
+            followup_val = "Hospitality sales teams using automated inquiry triage capture higher corporate booking conversion without increasing administrative headcount."
+        elif "logistics" in ind_str or "transport" in ind_str or "freight" in ind_str or "carrier" in ind_str or "fleet" in ind_str:
+            hook = f"I came across {comp_name}{loc_phrase} and reviewed your commercial freight and logistics operations."
+            pain = profile_pain or "Freight brokers and 3PL carriers frequently miss shipper contract opportunities because spot-quote and lane availability correspondence require intensive manual monitoring."
+            solution = f"We built {product_name} to automate commercial shipper prospect qualification, coordinate freight proposals, and stage lane rate outreach with operator review."
+            followup_val = "Logistics providers using grounded correspondence secure dedicated contract freight commitments and expand enterprise shipper relationships."
+        elif "educat" in ind_str or "edtech" in ind_str or "school" in ind_str or "universit" in ind_str or "college" in ind_str or "academ" in ind_str:
+            hook = f"I came across {comp_name}{loc_phrase} and have been following your innovative academic programs."
+            pain = profile_pain or "Educational institutions and EdTech providers often face high enrollment drop-off when prospective student and enterprise learner inquiries are not answered immediately."
+            solution = f"We built {product_name} to qualify prospective student and corporate enrollment inquiries, coordinate admissions consultations, and stage communications with admissions review."
+            followup_val = "Admissions teams using automated inquiry workflows increase enrollment conversion rates while maintaining academic guidance standards."
+        elif "market" in ind_str or "agency" in ind_str or "consult" in ind_str or "advisory" in ind_str or "pr" in ind_str:
+            hook = f"I came across {comp_name}{loc_phrase} and noticed your agency's creative campaigns and strategic client roster."
+            pain = profile_pain or "Agencies often face irregular revenue cycles when senior leadership is too busy delivering client retainers to maintain consistent outbound business development."
+            solution = f"We built {product_name} to systematically research ICP brand accounts, initiate personalized partnership outreach, and stage discovery drafts for partner approval."
+            followup_val = "Marketing and consulting agencies using grounded outreach maintain consistent new client pipeline without taking strategists away from active client deliverables."
+        elif "e-commerce" in ind_str or "ecommerce" in ind_str or "retail" in ind_str or "wholesale" in ind_str or "merchandis" in ind_str:
+            hook = f"I came across {comp_name}{loc_phrase} and noticed your omni-channel retail and consumer merchandise line."
+            pain = profile_pain or "E-commerce and retail brands struggle to scale B2B wholesale distribution, vendor partnerships, and retail buyer outreach effectively."
+            solution = f"We built {product_name} to identify target retail buyers, qualify wholesale distributor inquiries, and stage personalized pitch drafts with sales leadership review."
+            followup_val = "Retail brands using automated buyer correspondence expand their retail shelf placement and accelerate wholesale order volume."
+        elif "construct" in ind_str or "infrastruct" in ind_str or "contractor" in ind_str or "builder" in ind_str or "civil" in ind_str:
+            hook = f"I came across {comp_name}{loc_phrase} and noticed your portfolio of major civil and commercial construction projects."
+            pain = profile_pain or "General contractors and builders lose competitive advantage when subcontractor bid packages and project tender follow-ups require manual tracking."
+            solution = f"We built {product_name} to coordinate project tender inquiries, follow up on subcontractor bid submissions, and stage project correspondence with project manager review."
+            followup_val = "Construction teams using structured correspondence secure higher tender win rates and streamline project procurement cycles."
+        elif "auto" in ind_str or "motor" in ind_str or "vehicle" in ind_str or "dealership" in ind_str:
+            hook = f"I came across {comp_name}{loc_phrase} and reviewed your commercial vehicle fleet and dealership operations."
+            pain = profile_pain or "Commercial dealerships and fleet providers frequently lose corporate fleet buyers due to delayed quote turnaround and manual test-drive coordination."
+            solution = f"We built {product_name} to qualify enterprise fleet inquiries, coordinate test-drive consultations, and stage vehicle financing quotes with sales manager approval."
+            followup_val = "Dealerships using automated inquiry triage increase fleet sales closing rates and accelerate commercial buyer onboarding."
+        elif "agri" in ind_str or "farm" in ind_str or "crop" in ind_str or "grain" in ind_str:
+            hook = f"I came across {comp_name}{loc_phrase} and noticed your sustainable agribusiness and crop production operations."
+            pain = profile_pain or "Agricultural producers and distributors face unpredictable contract pricing and distribution delays when wholesale buyer outreach is fragmented."
+            solution = f"We built {product_name} to connect with commercial food processors, negotiate grain contracts, and stage supply agreements with full leadership sign-off."
+            followup_val = "Agribusiness operators using grounded correspondence secure reliable off-take agreements and expand distribution partnerships."
+        elif "recruit" in ind_str or "staffing" in ind_str or "talent" in ind_str or "hr" in ind_str or "human resources" in ind_str:
+            hook = f"I came across {comp_name}{loc_phrase} and noticed your specialized executive search and talent solutions."
+            pain = profile_pain or "Staffing agencies spend excessive recruiter hours sourcing candidate interest and coordinating client interview availability manually."
+            solution = f"We built {product_name} to qualify candidate availability, match hiring manager requirements, and stage candidate presentation drafts for recruiter sign-off."
+            followup_val = "Recruitment firms using automated candidate outreach shorten time-to-fill and increase direct placement fee revenue."
+        elif "clean" in ind_str or "solar" in ind_str or "energy" in ind_str or "renew" in ind_str:
+            hook = f"I came across {comp_name}{loc_phrase} and noticed your leadership in renewable energy infrastructure."
+            pain = profile_pain or "Clean energy developers often face long project development cycles when commercial site off-takers and municipal stakeholders require multi-touch consensus building."
+            solution = f"We built {product_name} to identify commercial solar off-takers, coordinate feasibility consultations, and stage project proposals with engineer review."
+            followup_val = "CleanTech teams using grounded outreach accelerate PPA discussions and commercial energy project deployment."
+        elif "hvac" in ind_str or "home service" in ind_str or "facility" in ind_str or "commercial service" in ind_str or "msp" in ind_str:
             hook = f"I came across {comp_name}{loc_phrase} and noticed your commercial service operations in facility systems."
-            pain = "Commercial contractors often lose high-margin bids because quote follow-ups and service agreement renewals require intensive manual tracking."
+            pain = profile_pain or "Commercial contractors often lose high-margin bids because quote follow-ups and service agreement renewals require intensive manual tracking."
             solution = f"We built {product_name} to accelerate quotation follow-ups and maintenance agreement outreach with zero unapproved emails sent without your team's review."
             followup_val = "Service teams using automated follow-up coordination improve estimate closing rates without adding back-office overhead."
+        elif "dent" in ind_str or "oral" in ind_str:
+            hook = f"I came across {comp_name}{loc_phrase} and noticed your work in specialized dental care."
+            pain = profile_pain or "Many dental practices encounter challenges coordinating multi-step appointment follow-ups without manual front-desk overhead."
+            solution = f"We built {product_name} to assist practices in automating consultation scheduling and inquiry correspondence while keeping full human approval over every draft."
+            followup_val = "Practices using grounded correspondence support typically reduce appointment drop-off while ensuring every communication remains verifiable."
+        elif "clinic" in ind_str or "health" in ind_str or "medic" in ind_str or "hospital" in ind_str:
+            hook = f"I came across {comp_name}{loc_phrase} and noticed your work in specialized healthcare services."
+            pain = profile_pain or "Many clinics encounter challenges coordinating consultation follow-ups and specialist referrals without administrative burden."
+            solution = f"We built {product_name} to assist clinical teams in streamlining consultation correspondence while keeping local privacy and operator review gates."
+            followup_val = "Clinics using grounded correspondence workflows improve consultation show rates while ensuring all communications remain compliant and verified."
         else:
             clean_ind = profile.get("industry") or "your sector"
             hook = f"I came across {comp_name}{loc_phrase} and was impressed by your team's work in {clean_ind}."
-            pain = f"Organizations in {clean_ind} often encounter challenges coordinating timely prospect correspondence without increasing manual administrative overhead."
+            pain = profile_pain or f"Organizations in {clean_ind} often encounter challenges coordinating timely prospect correspondence without increasing manual administrative overhead."
             solution = f"We built {product_name} to {product_desc} while keeping full human approval over every draft before anything is sent."
             followup_val = "Teams using grounded correspondence workflows improve prospect engagement and response velocity while ensuring every outbound communication is verified."
 

@@ -751,6 +751,24 @@ MIGRATIONS: list[str] = [
     );
     CREATE INDEX IF NOT EXISTS idx_research_cache_domain ON research_cache(domain);
     """,
+    # ── v24: universal multi-industry business profile metadata ──
+    """
+    ALTER TABLE business_profiles ADD COLUMN subcategory TEXT DEFAULT '';
+    ALTER TABLE business_profiles ADD COLUMN business_type TEXT DEFAULT '';
+    ALTER TABLE business_profiles ADD COLUMN target_customer_profile TEXT DEFAULT '';
+    ALTER TABLE business_profiles ADD COLUMN revenue_range TEXT DEFAULT '';
+    ALTER TABLE business_profiles ADD COLUMN decision_maker_roles TEXT DEFAULT '[]';
+    ALTER TABLE business_profiles ADD COLUMN qualification_questions TEXT DEFAULT '[]';
+    ALTER TABLE business_profiles ADD COLUMN scoring_criteria TEXT DEFAULT '{}';
+    ALTER TABLE business_profiles ADD COLUMN products_services TEXT DEFAULT '[]';
+    ALTER TABLE business_profiles ADD COLUMN pain_points TEXT DEFAULT '[]';
+    ALTER TABLE business_profiles ADD COLUMN buying_signals TEXT DEFAULT '[]';
+    ALTER TABLE business_profiles ADD COLUMN messaging_rules TEXT DEFAULT '{}';
+
+    -- Ensure Dental is NEVER the default business domain
+    UPDATE business_profiles SET is_default = 0 WHERE id = 'prof_dental_in';
+    UPDATE business_profiles SET is_default = 1 WHERE id = 'prof_saas_global';
+    """,
 ]
 
 CRM_PIPELINE_STAGES: list[str] = [
@@ -3010,6 +3028,34 @@ class StateManager:
 
     # ── Business Profiles & Lead Discovery ──
 
+    @staticmethod
+    def _normalize_business_profile_dict(d: dict) -> dict:
+        json_fields = (
+            "icp_titles",
+            "target_criteria",
+            "decision_maker_roles",
+            "qualification_questions",
+            "scoring_criteria",
+            "products_services",
+            "pain_points",
+            "buying_signals",
+            "messaging_rules",
+        )
+        for k in json_fields:
+            raw = d.get(k)
+            try:
+                if raw is None or raw == "":
+                    d[k] = [] if k in ("icp_titles", "decision_maker_roles", "qualification_questions", "products_services", "pain_points", "buying_signals") else {}
+                else:
+                    d[k] = json.loads(raw) if isinstance(raw, str) else raw
+            except (json.JSONDecodeError, TypeError):
+                d[k] = [] if k in ("icp_titles", "decision_maker_roles", "qualification_questions", "products_services", "pain_points", "buying_signals") else {}
+        if not d.get("decision_maker_roles") and d.get("icp_titles"):
+            d["decision_maker_roles"] = d["icp_titles"]
+        if not d.get("scoring_criteria") and d.get("target_criteria"):
+            d["scoring_criteria"] = d["target_criteria"]
+        return d
+
     async def get_business_profiles(self) -> list[dict]:
         await self.seed_default_business_profiles()
         async with self._connect() as db:
@@ -3027,13 +3073,7 @@ class StateManager:
                         continue
                     if norm_name:
                         seen_names.add(norm_name)
-                    for k in ("icp_titles", "target_criteria"):
-                        raw = d.get(k)
-                        try:
-                            d[k] = json.loads(raw) if raw else ([] if k == "icp_titles" else {})
-                        except (json.JSONDecodeError, TypeError):
-                            d[k] = [] if k == "icp_titles" else {}
-                    out.append(d)
+                    out.append(self._normalize_business_profile_dict(d))
                 return out
 
     async def get_business_profile(self, profile_id: str) -> dict | None:
@@ -3045,14 +3085,7 @@ class StateManager:
                 row = await cursor.fetchone()
                 if not row:
                     return None
-                d = dict(row)
-                for k in ("icp_titles", "target_criteria"):
-                    raw = d.get(k)
-                    try:
-                        d[k] = json.loads(raw) if raw else ([] if k == "icp_titles" else {})
-                    except (json.JSONDecodeError, TypeError):
-                        d[k] = [] if k == "icp_titles" else {}
-                return d
+                return self._normalize_business_profile_dict(dict(row))
 
     async def create_business_profile(self, profile_data: dict) -> dict:
         name = (profile_data.get("name") or "New Business Profile").strip()
@@ -3060,18 +3093,46 @@ class StateManager:
         geography = profile_data.get("geography") or ""
         geography_scope = profile_data.get("geography_scope") or "worldwide"
         company_size = profile_data.get("company_size") or ""
-        titles_val = profile_data.get("icp_titles") or []
+        
+        titles_val = profile_data.get("icp_titles") or profile_data.get("decision_maker_roles") or []
         icp_titles = json.dumps(titles_val if isinstance(titles_val, list) else [titles_val])
+        
         product_name = profile_data.get("product_name") or ""
         product_description = profile_data.get("product_description") or ""
-        crit_val = profile_data.get("target_criteria") or {}
+        
+        crit_val = profile_data.get("target_criteria") or profile_data.get("scoring_criteria") or {}
         target_criteria = json.dumps(crit_val if isinstance(crit_val, dict) else {})
         is_default = 1 if profile_data.get("is_default") else 0
+
+        subcategory = profile_data.get("subcategory") or ""
+        business_type = profile_data.get("business_type") or ""
+        target_customer_profile = profile_data.get("target_customer_profile") or ""
+        revenue_range = profile_data.get("revenue_range") or ""
+        
+        dm_roles = profile_data.get("decision_maker_roles") or titles_val
+        decision_maker_roles = json.dumps(dm_roles if isinstance(dm_roles, list) else [dm_roles])
+        
+        qual_q = profile_data.get("qualification_questions") or []
+        qualification_questions = json.dumps(qual_q if isinstance(qual_q, list) else [qual_q])
+        
+        score_crit = profile_data.get("scoring_criteria") or crit_val
+        scoring_criteria = json.dumps(score_crit if isinstance(score_crit, dict) else {})
+        
+        prod_serv = profile_data.get("products_services") or []
+        products_services = json.dumps(prod_serv if isinstance(prod_serv, list) else [prod_serv])
+        
+        pains = profile_data.get("pain_points") or []
+        pain_points = json.dumps(pains if isinstance(pains, list) else [pains])
+        
+        signals = profile_data.get("buying_signals") or []
+        buying_signals = json.dumps(signals if isinstance(signals, list) else [signals])
+        
+        msg_rules = profile_data.get("messaging_rules") or {}
+        messaging_rules = json.dumps(msg_rules if isinstance(msg_rules, dict) else {})
 
         async with self._connect() as db:
             pid = profile_data.get("id")
             if not pid:
-                # Check for existing profile with the same name to prevent duplicate creation
                 async with db.execute(
                     "SELECT id, is_default FROM business_profiles WHERE LOWER(TRIM(name)) = LOWER(TRIM(?)) LIMIT 1",
                     (name,),
@@ -3084,114 +3145,533 @@ class StateManager:
                     else:
                         pid = _new_id()
 
-            await db.execute(
-                """INSERT INTO business_profiles
-                   (id, name, industry, geography, geography_scope, company_size, icp_titles,
-                    product_name, product_description, target_criteria, is_default)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                   ON CONFLICT(id) DO UPDATE SET
-                    name=excluded.name,
-                    industry=excluded.industry,
-                    geography=excluded.geography,
-                    geography_scope=excluded.geography_scope,
-                    company_size=excluded.company_size,
-                    icp_titles=excluded.icp_titles,
-                    product_name=excluded.product_name,
-                    product_description=excluded.product_description,
-                    target_criteria=excluded.target_criteria,
-                    is_default=excluded.is_default,
-                    updated_at=CURRENT_TIMESTAMP""",
-                (pid, name, industry, geography, geography_scope, company_size, icp_titles,
-                 product_name, product_description, target_criteria, is_default)
-            )
+            # Check if migration v24 columns are present in business_profiles
+            async with db.execute("PRAGMA table_info(business_profiles)") as cursor:
+                cols = {row[1] for row in await cursor.fetchall()}
+
+            if "subcategory" in cols:
+                await db.execute(
+                    """INSERT INTO business_profiles
+                       (id, name, industry, geography, geography_scope, company_size, icp_titles,
+                        product_name, product_description, target_criteria, is_default,
+                        subcategory, business_type, target_customer_profile, revenue_range,
+                        decision_maker_roles, qualification_questions, scoring_criteria,
+                        products_services, pain_points, buying_signals, messaging_rules)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                       ON CONFLICT(id) DO UPDATE SET
+                        name=excluded.name,
+                        industry=excluded.industry,
+                        geography=excluded.geography,
+                        geography_scope=excluded.geography_scope,
+                        company_size=excluded.company_size,
+                        icp_titles=excluded.icp_titles,
+                        product_name=excluded.product_name,
+                        product_description=excluded.product_description,
+                        target_criteria=excluded.target_criteria,
+                        is_default=excluded.is_default,
+                        subcategory=excluded.subcategory,
+                        business_type=excluded.business_type,
+                        target_customer_profile=excluded.target_customer_profile,
+                        revenue_range=excluded.revenue_range,
+                        decision_maker_roles=excluded.decision_maker_roles,
+                        qualification_questions=excluded.qualification_questions,
+                        scoring_criteria=excluded.scoring_criteria,
+                        products_services=excluded.products_services,
+                        pain_points=excluded.pain_points,
+                        buying_signals=excluded.buying_signals,
+                        messaging_rules=excluded.messaging_rules,
+                        updated_at=CURRENT_TIMESTAMP""",
+                    (pid, name, industry, geography, geography_scope, company_size, icp_titles,
+                     product_name, product_description, target_criteria, is_default,
+                     subcategory, business_type, target_customer_profile, revenue_range,
+                     decision_maker_roles, qualification_questions, scoring_criteria,
+                     products_services, pain_points, buying_signals, messaging_rules)
+                )
+            else:
+                await db.execute(
+                    """INSERT INTO business_profiles
+                       (id, name, industry, geography, geography_scope, company_size, icp_titles,
+                        product_name, product_description, target_criteria, is_default)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                       ON CONFLICT(id) DO UPDATE SET
+                        name=excluded.name,
+                        industry=excluded.industry,
+                        geography=excluded.geography,
+                        geography_scope=excluded.geography_scope,
+                        company_size=excluded.company_size,
+                        icp_titles=excluded.icp_titles,
+                        product_name=excluded.product_name,
+                        product_description=excluded.product_description,
+                        target_criteria=excluded.target_criteria,
+                        is_default=excluded.is_default,
+                        updated_at=CURRENT_TIMESTAMP""",
+                    (pid, name, industry, geography, geography_scope, company_size, icp_titles,
+                     product_name, product_description, target_criteria, is_default)
+                )
             await db.commit()
         res = await self.get_business_profile(pid)
         return res or profile_data
 
     async def seed_default_business_profiles(self, config=None):
-        """Seed initial multi-industry business profiles if missing."""
-        # Profile 1: Dental Outreach (India)
-        p1 = {
-            "id": "prof_dental_in",
-            "name": "Dental Clinics & Practices (India)",
-            "industry": "Healthcare / Dental",
-            "geography": "Indore, Madhya Pradesh, India",
-            "geography_scope": "cities",
-            "company_size": "10-200 employees",
-            "icp_titles": ["Owner", "Dentist", "Dental Surgeon", "Founder", "Director", "Practice Manager"],
-            "product_name": "Harvey AI",
-            "product_description": "Autonomous B2B outreach assistant that drafts personalized introductory correspondence grounded in verified research",
-            "target_criteria": {"min_score": 60, "require_decision_maker": True},
-            "is_default": 1,
-        }
-        # Profile 2: B2B SaaS & Growth Tech
-        p2 = {
-            "id": "prof_saas_global",
-            "name": "B2B SaaS & High-Growth Tech",
-            "industry": "Software / B2B SaaS",
-            "geography": "North America & Remote",
-            "company_size": "20-500 employees",
-            "icp_titles": ["VP Sales", "Head of Growth", "Founder", "CEO", "Revenue Operations"],
-            "product_name": "Harvey AI",
-            "product_description": "AI sales agent that identifies prospects, enriches company signals, and drafts outbound sequences",
-            "target_criteria": {"min_score": 65},
-            "is_default": 0,
-        }
-        # Profile 3: Specialized Healthcare Clinics
-        p3 = {
-            "id": "prof_specialty_clinics",
-            "name": "Private Healthcare & Specialty Clinics",
-            "industry": "Specialized Healthcare Services",
-            "geography": "Tier 1 & Tier 2 Metro Clinics",
-            "company_size": "5-50 employees",
-            "icp_titles": ["Clinic Director", "Practice Owner", "Medical Superintendent", "Partner"],
-            "product_name": "Harvey AI",
-            "product_description": "Automated outreach and consultation coordination software",
-            "target_criteria": {"min_score": 60},
-            "is_default": 0,
-        }
-        # Profile 4: Legal Services & Law Firms
-        p4 = {
-            "id": "prof_legal_services",
-            "name": "Corporate Law & Legal Advisory",
-            "industry": "Legal Services / Law Firms",
-            "geography": "United States & United Kingdom",
-            "company_size": "15-250 employees",
-            "icp_titles": ["Managing Partner", "Partner", "Practice Group Leader", "Legal Director", "General Counsel"],
-            "product_name": "Harvey AI",
-            "product_description": "Intelligent client intake and consultation coordination agent with local confidentiality and operator review gates",
-            "target_criteria": {"min_score": 60, "require_decision_maker": True},
-            "is_default": 0,
-        }
-        # Profile 5: Accounting & Financial Advisory
-        p5 = {
-            "id": "prof_accounting_finance",
-            "name": "Accounting, Tax & Advisory Services",
-            "industry": "Accounting & Financial Services",
-            "geography": "National & Regional Metro Areas",
-            "company_size": "10-150 employees",
-            "icp_titles": ["Managing Partner", "CPA", "Audit Partner", "Tax Director", "Founder", "Practice Leader"],
-            "product_name": "Harvey AI",
-            "product_description": "Autonomous advisory correspondence assistant that automates client onboarding and reduces seasonal follow-up overhead",
-            "target_criteria": {"min_score": 60},
-            "is_default": 0,
-        }
-        # Profile 6: Commercial HVAC & Facility Services
-        p6 = {
-            "id": "prof_home_services",
-            "name": "Commercial HVAC & Facility Services",
-            "industry": "Commercial & Home Services",
-            "geography": "Regional Commercial Service Areas",
-            "company_size": "20-200 employees",
-            "icp_titles": ["Owner", "VP Operations", "Commercial Service Director", "General Manager", "Estimating Director"],
-            "product_name": "Harvey AI",
-            "product_description": "Fast quote follow-up and commercial service agreement outreach assistant for facility and contracting teams",
-            "target_criteria": {"min_score": 60},
-            "is_default": 0,
-        }
-        for p in (p1, p2, p3, p4, p5, p6):
+        """Seed universal multi-industry business profiles (16 core verticals + test profiles)."""
+        profiles = [
+            # 1. IT, Software, SaaS & AI (PRIMARY DEFAULT)
+            {
+                "id": "prof_saas_global",
+                "name": "B2B SaaS & High-Growth Tech",
+                "industry": "IT, Software, SaaS and AI",
+                "subcategory": "Cloud Platforms & AI Automation",
+                "business_type": "B2B SaaS / Enterprise Software",
+                "target_customer_profile": "Mid-market & enterprise technology providers scaling sales pipelines",
+                "company_size": "20-500 employees",
+                "geography": "North America, Europe & Global Remote",
+                "geography_scope": "worldwide",
+                "revenue_range": "$2M - $50M ARR",
+                "decision_maker_roles": ["VP Sales", "Head of Growth", "Founder", "CEO", "CTO", "Revenue Operations"],
+                "icp_titles": ["VP Sales", "Head of Growth", "Founder", "CEO", "Revenue Operations"],
+                "product_name": "Harvey AI",
+                "product_description": "Autonomous AI sales development agent that grounds prospect outreach in verified account research",
+                "qualification_questions": ["Are you actively scaling outbound pipeline?", "Do you have dedicated SDR/BDR teams?"],
+                "scoring_criteria": {"min_score": 65, "require_decision_maker": True},
+                "products_services": ["Autonomous Prospect Intelligence", "Outbound Pipeline Automation", "AI Sales Agent"],
+                "pain_points": ["Manual prospecting time drain", "High SDR ramp overhead", "Low response on generic templates"],
+                "buying_signals": ["Hiring SDRs/BDRs", "Recent venture capital round", "Adoption of modern sales tech stack"],
+                "messaging_rules": {"tone": "consultative", "focus": "pipeline velocity and account research", "forbidden_terms": ["patient", "clinical", "clinic", "dental", "doctor", "dentist"]},
+                "target_criteria": {"min_score": 65, "require_decision_maker": True},
+                "is_default": 1,
+            },
+            # 2. Legal Services and Law Firms
+            {
+                "id": "prof_legal_services",
+                "name": "Corporate Law & Legal Advisory",
+                "industry": "Legal Services and Law Firms",
+                "subcategory": "Commercial Advisory & Litigation",
+                "business_type": "Law Firm / Legal Partnership",
+                "target_customer_profile": "Corporate legal practices handling commercial transactions and regulatory matters",
+                "company_size": "15-250 employees",
+                "geography": "United States & United Kingdom",
+                "geography_scope": "countries",
+                "revenue_range": "$5M - $100M",
+                "decision_maker_roles": ["Managing Partner", "Senior Partner", "Practice Group Leader", "Legal Director", "General Counsel"],
+                "icp_titles": ["Managing Partner", "Partner", "Practice Group Leader", "Legal Director", "General Counsel"],
+                "product_name": "Harvey AI",
+                "product_description": "Intelligent client intake and consultation coordination agent with local confidentiality and operator review gates",
+                "qualification_questions": ["Does the firm manage direct client consultation triage?", "Is there a designated partner overseeing intake?"],
+                "scoring_criteria": {"min_score": 60, "require_decision_maker": True},
+                "products_services": ["Confidential Client Intake Automation", "Inquiry Triage & Partner Review Assistant"],
+                "pain_points": ["Prospective client intake triage bottlenecks", "Consultation scheduling while ensuring strict confidentiality", "Managing non-billable administrative follow-up"],
+                "buying_signals": ["Expanding regional office locations", "High-profile commercial matter verdicts", "Practice group lateral hires"],
+                "messaging_rules": {"tone": "formal", "focus": "client confidentiality and partner review oversight", "forbidden_terms": ["patient", "clinical", "clinic", "dental"]},
+                "target_criteria": {"min_score": 60, "require_decision_maker": True},
+                "is_default": 0,
+            },
+            # 3. Healthcare, Hospitals, Clinics & Diagnostics
+            {
+                "id": "prof_healthcare_specialty",
+                "name": "Private Healthcare & Specialty Clinics",
+                "industry": "Healthcare, Hospitals, Clinics and Diagnostics",
+                "subcategory": "Outpatient Multi-Specialty Clinics",
+                "business_type": "Private Healthcare Practice",
+                "target_customer_profile": "Specialty medical centers, surgical suites, and diagnostic clinics",
+                "company_size": "10-150 employees",
+                "geography": "Tier 1 & Tier 2 Regional Metro Centers",
+                "geography_scope": "regions",
+                "revenue_range": "$2M - $25M",
+                "decision_maker_roles": ["Clinic Director", "Medical Superintendent", "Practice Owner", "Clinical Administrator"],
+                "icp_titles": ["Clinic Director", "Practice Owner", "Medical Superintendent", "Partner"],
+                "product_name": "Harvey AI",
+                "product_description": "Automated consultation coordination and patient intake triage software",
+                "qualification_questions": ["Does the practice handle elective consultations?", "Is there an administrative manager for scheduling?"],
+                "scoring_criteria": {"min_score": 60, "require_decision_maker": True},
+                "products_services": ["Consultation Intake Coordination", "Specialist Referral Follow-Up"],
+                "pain_points": ["Patient consultation drop-off", "Front-desk triage phone congestion", "Specialist referral follow-up overhead"],
+                "buying_signals": ["Opening additional surgical suites", "New diagnostic imaging equipment", "Expansion to multi-site practice"],
+                "messaging_rules": {"tone": "professional", "focus": "consultation show rates and patient care continuity", "forbidden_terms": []},
+                "target_criteria": {"min_score": 60},
+                "is_default": 0,
+            },
+            # 4. Dental Clinics (TEST INDUSTRY — STRICTLY NOT DEFAULT)
+            {
+                "id": "prof_dental_in",
+                "name": "Dental Clinics & Practices (India)",
+                "industry": "Healthcare / Dental",
+                "subcategory": "General & Cosmetic Dentistry",
+                "business_type": "Private Dental Practice",
+                "target_customer_profile": "Multi-chair dental clinics and oral surgery practices",
+                "company_size": "10-200 employees",
+                "geography": "Indore, Madhya Pradesh, India",
+                "geography_scope": "cities",
+                "revenue_range": "INR 50L - 10Cr",
+                "decision_maker_roles": ["Principal Dentist", "Dental Surgeon", "Clinic Owner", "Practice Manager"],
+                "icp_titles": ["Owner", "Dentist", "Dental Surgeon", "Founder", "Director", "Practice Manager"],
+                "product_name": "Harvey AI",
+                "product_description": "Autonomous B2B outreach assistant that drafts personalized introductory correspondence grounded in verified research",
+                "qualification_questions": ["How many operatories/chairs are active?", "Do you handle elective cosmetic oral procedures?"],
+                "scoring_criteria": {"min_score": 60, "require_decision_maker": True},
+                "products_services": ["Dental Consultation Triage", "Recall & Preventive Hygiene Follow-Up"],
+                "pain_points": ["Front-desk phone overload", "No-shows on elective cosmetic consultations", "Manual recall chasing"],
+                "buying_signals": ["Adding new operatories", "Investing in digital scanners/CBCT", "New associate dentists"],
+                "messaging_rules": {"tone": "consultative", "focus": "chair utilization and low-friction appointment scheduling", "forbidden_terms": []},
+                "target_criteria": {"min_score": 60, "require_decision_maker": True},
+                "is_default": 0,
+            },
+            # 5. Real Estate and Property
+            {
+                "id": "prof_real_estate",
+                "name": "Commercial Real Estate & Property Advisory",
+                "industry": "Real Estate and Property",
+                "subcategory": "Commercial Brokerage & Multi-Family Management",
+                "business_type": "Real Estate Brokerage / Asset Management Firm",
+                "target_customer_profile": "Commercial real estate brokerages, property management firms, and asset developers",
+                "company_size": "10-150 employees",
+                "geography": "North America, UK & UAE Metro Markets",
+                "geography_scope": "worldwide",
+                "revenue_range": "$3M - $50M Transaction Volume",
+                "decision_maker_roles": ["Broker-Owner", "Managing Principal", "Director of Acquisitions", "VP Property Management", "Commercial Leasing Director"],
+                "icp_titles": ["Broker-Owner", "Managing Principal", "Director of Acquisitions", "VP Property Management", "Commercial Leasing Director"],
+                "product_name": "Harvey AI",
+                "product_description": "Autonomous real estate inquiry qualification and property viewing coordination assistant",
+                "qualification_questions": ["What is your square footage under management?", "Do you focus on commercial leasing, residential, or mixed-use?"],
+                "scoring_criteria": {"min_score": 60, "require_decision_maker": True},
+                "products_services": ["Property Viewing Inquiry Qualification", "Listing Follow-up & Lease Renewal Assistant"],
+                "pain_points": ["Slow response time to high-value buyer inquiries", "Lease renewal tracking lag", "Unqualified listing inquiries overwhelming agents"],
+                "buying_signals": ["New commercial development permits", "Expanding portfolio under management", "Major leasing transactions"],
+                "messaging_rules": {"tone": "consultative", "focus": "speed-to-lead for high-value inquiries and lease conversion", "forbidden_terms": ["patient", "clinical", "clinic", "dental"]},
+                "target_criteria": {"min_score": 60, "require_decision_maker": True},
+                "is_default": 0,
+            },
+            # 6. Manufacturing and Industrial
+            {
+                "id": "prof_manufacturing",
+                "name": "Precision Manufacturing & Industrial OEM",
+                "industry": "Manufacturing and Industrial",
+                "subcategory": "Contract Manufacturing, CNC Machining & Industrial Equipment",
+                "business_type": "Industrial OEM & Contract Manufacturer",
+                "target_customer_profile": "Precision machining, industrial automation, and custom equipment manufacturers",
+                "company_size": "25-300 employees",
+                "geography": "North America, Germany & Global Industrial Corridors",
+                "geography_scope": "worldwide",
+                "revenue_range": "$10M - $100M",
+                "decision_maker_roles": ["VP Operations", "Plant Manager", "Director of Procurement", "Managing Director", "VP Engineering"],
+                "icp_titles": ["VP Operations", "Plant Manager", "Director of Procurement", "Managing Director", "VP Engineering"],
+                "product_name": "Harvey AI",
+                "product_description": "Industrial RFQ intake qualification and commercial supply agreement follow-up agent",
+                "qualification_questions": ["What ISO/AS9100 certifications does the facility hold?", "Do you handle custom build-to-print or proprietary lines?"],
+                "scoring_criteria": {"min_score": 60, "require_decision_maker": True},
+                "products_services": ["Industrial RFQ Intake & Estimate Tracking", "Supply Agreement Renewal Outreach"],
+                "pain_points": ["Lengthy quotation cycles and unclosed RFQs", "Customer concentration risk", "Manual follow-up on engineering estimates"],
+                "buying_signals": ["Facility expansions", "Acquisition of 5-axis CNC equipment", "ISO/AS9100 certification renewals"],
+                "messaging_rules": {"tone": "direct", "focus": "quote conversion velocity and industrial supply agreement renewals", "forbidden_terms": ["patient", "clinical", "clinic", "dental"]},
+                "target_criteria": {"min_score": 60, "require_decision_maker": True},
+                "is_default": 0,
+            },
+            # 7. Finance, Accounting and Insurance
+            {
+                "id": "prof_accounting_finance",
+                "name": "Accounting, Tax & Advisory Services",
+                "industry": "Finance, Accounting and Insurance",
+                "subcategory": "CPA Advisory, Corporate Tax & Commercial Risk Underwriting",
+                "business_type": "Accounting & Financial Advisory Firm",
+                "target_customer_profile": "Regional CPA partnerships, fractional CFO advisory, and commercial insurance brokerages",
+                "company_size": "10-150 employees",
+                "geography": "National Metro & Regional Commercial Centers",
+                "geography_scope": "regions",
+                "revenue_range": "$2M - $30M",
+                "decision_maker_roles": ["Managing Partner", "CPA", "Tax Director", "Audit Partner", "Practice Leader", "Commercial Risk Director"],
+                "icp_titles": ["Managing Partner", "CPA", "Audit Partner", "Tax Director", "Founder", "Practice Leader"],
+                "product_name": "Harvey AI",
+                "product_description": "Autonomous advisory correspondence assistant that automates client onboarding and reduces seasonal follow-up overhead",
+                "qualification_questions": ["What accounting and tax software ecosystem does the firm utilize?", "Are you expanding outsourced advisory?"],
+                "scoring_criteria": {"min_score": 60, "require_decision_maker": True},
+                "products_services": ["Client Advisory Intake Automation", "Seasonal Onboarding Document Chase Assistant"],
+                "pain_points": ["Seasonal onboarding document collection bottlenecks", "Client churn during fee renegotiations", "Partner administrative scheduling overhead"],
+                "buying_signals": ["Firm mergers & acquisitions", "Opening new advisory branches", "Adopting cloud ERP systems"],
+                "messaging_rules": {"tone": "formal", "focus": "onboarding turnaround times and partner advisory leverage", "forbidden_terms": ["patient", "clinical", "clinic", "dental"]},
+                "target_criteria": {"min_score": 60, "require_decision_maker": True},
+                "is_default": 0,
+            },
+            # 8. Education and EdTech
+            {
+                "id": "prof_education_edtech",
+                "name": "Executive Education & EdTech Programs",
+                "industry": "Education and EdTech",
+                "subcategory": "Higher Education, Executive Certification & Corporate Learning",
+                "business_type": "Educational Institution / Enterprise EdTech Provider",
+                "target_customer_profile": "Universities, executive learning institutes, and corporate training platforms",
+                "company_size": "20-250 employees",
+                "geography": "Global & Regional Educational Hubs",
+                "geography_scope": "worldwide",
+                "revenue_range": "$3M - $40M",
+                "decision_maker_roles": ["Dean of Admissions", "Director of Enrollment", "VP Academic Partnerships", "Head of Corporate Training", "Provost"],
+                "icp_titles": ["Dean of Admissions", "Director of Enrollment", "VP Academic Partnerships", "Head of Corporate Training", "Provost"],
+                "product_name": "Harvey AI",
+                "product_description": "Automated student inquiry qualification and corporate partnership outreach assistant",
+                "qualification_questions": ["What learning management and SIS systems do you use?", "Do you offer executive or hybrid degree programs?"],
+                "scoring_criteria": {"min_score": 60, "require_decision_maker": True},
+                "products_services": ["Prospective Student Inquiry Qualification", "Corporate Training Partnership Outreach"],
+                "pain_points": ["Student drop-off between inquiry and application", "Corporate training RFP follow-up delays", "Manual enrollment counseling workload"],
+                "buying_signals": ["Launching new online certification tracks", "Corporate workforce development initiatives", "Accreditation milestones"],
+                "messaging_rules": {"tone": "consultative", "focus": "inquiry responsiveness and student enrollment yield", "forbidden_terms": ["patient", "clinical", "clinic", "dental"]},
+                "target_criteria": {"min_score": 60, "require_decision_maker": True},
+                "is_default": 0,
+            },
+            # 9. E-commerce and Retail
+            {
+                "id": "prof_ecommerce_retail",
+                "name": "Omnichannel E-commerce & Wholesale Retail",
+                "industry": "E-commerce and Retail",
+                "subcategory": "Omnichannel Retail Brands & B2B Wholesale Distribution",
+                "business_type": "Consumer Brand / Wholesale Merchandising Group",
+                "target_customer_profile": "Fast-growing direct-to-consumer brands and wholesale retail distributors",
+                "company_size": "15-200 employees",
+                "geography": "National Distribution & International E-commerce Hubs",
+                "geography_scope": "worldwide",
+                "revenue_range": "$5M - $60M GMV",
+                "decision_maker_roles": ["VP E-commerce", "Head of Merchandising", "Director of Wholesale Partnerships", "Founder", "Chief Commercial Officer"],
+                "icp_titles": ["VP E-commerce", "Head of Merchandising", "Director of Wholesale Partnerships", "Founder", "Chief Commercial Officer"],
+                "product_name": "Harvey AI",
+                "product_description": "B2B wholesale buyer account acquisition and retail merchant partnership assistant",
+                "qualification_questions": ["What e-commerce platform and WMS do you operate?", "Are you actively onboarding wholesale retail accounts?"],
+                "scoring_criteria": {"min_score": 60, "require_decision_maker": True},
+                "products_services": ["B2B Wholesale Account Acquisition", "Retail Buyer Partnership Outreach"],
+                "pain_points": ["Difficulty opening new retail stockist accounts", "Wholesale order reorder drop-off", "Manual catalog distribution to buyers"],
+                "buying_signals": ["New seasonal catalog launches", "Retail store shelf placements", "Expanded warehouse logistics"],
+                "messaging_rules": {"tone": "consultative", "focus": "wholesale account expansion and buyer reorder velocity", "forbidden_terms": ["patient", "clinical", "clinic", "dental"]},
+                "target_criteria": {"min_score": 60, "require_decision_maker": True},
+                "is_default": 0,
+            },
+            # 10. Hospitality, Hotels and Restaurants
+            {
+                "id": "prof_hospitality_hotels",
+                "name": "Boutique Hotels & Event Hospitality",
+                "industry": "Hospitality, Hotels and Restaurants",
+                "subcategory": "Boutique Hotels, Luxury Resorts & Restaurant Hospitality Groups",
+                "business_type": "Hospitality Operator / Hotel & Event Management Group",
+                "target_customer_profile": "Independent boutique hotel groups, corporate event resorts, and multi-concept restaurant operators",
+                "company_size": "25-300 employees",
+                "geography": "Metropolitan Tourist Hubs & Resort Destinations",
+                "geography_scope": "worldwide",
+                "revenue_range": "$5M - $50M",
+                "decision_maker_roles": ["General Manager", "Director of Sales & Events", "VP Hospitality", "Corporate Food & Beverage Director", "Managing Principal"],
+                "icp_titles": ["General Manager", "Director of Sales & Events", "VP Hospitality", "Corporate Food & Beverage Director", "Managing Principal"],
+                "product_name": "Harvey AI",
+                "product_description": "Corporate group event and private banquet inquiry qualification assistant",
+                "qualification_questions": ["What is your property event and banquet room capacity?", "Do you host corporate offsites and conferences?"],
+                "scoring_criteria": {"min_score": 60, "require_decision_maker": True},
+                "products_services": ["Corporate Group & Event Inquiry Qualification", "Private Dining & Banquet Follow-Up Assistant"],
+                "pain_points": ["Delayed responses to corporate event and retreat RFPs", "Off-season corporate booking dips", "Event coordinator administrative overload"],
+                "buying_signals": ["Property renovations", "Opening new banquet venues", "Hosting regional business conferences"],
+                "messaging_rules": {"tone": "consultative", "focus": "event booking conversion speed and corporate retreat yield", "forbidden_terms": ["patient", "clinical", "clinic", "dental"]},
+                "target_criteria": {"min_score": 60, "require_decision_maker": True},
+                "is_default": 0,
+            },
+            # 11. Logistics and Transportation
+            {
+                "id": "prof_logistics_transport",
+                "name": "Freight Logistics & Intermodal Haulage",
+                "industry": "Logistics and Transportation",
+                "subcategory": "Freight Brokerage, Third-Party Logistics (3PL) & Fleet Haulage",
+                "business_type": "Logistics & Supply Chain Carrier / Brokerage",
+                "target_customer_profile": "Asset and non-asset freight carriers, 3PL warehouses, and intermodal transport firms",
+                "company_size": "20-250 employees",
+                "geography": "National Freight Corridors & Global Shipping Hubs",
+                "geography_scope": "worldwide",
+                "revenue_range": "$8M - $100M",
+                "decision_maker_roles": ["VP Logistics", "Director of Supply Chain", "Head of Freight Brokerage", "Managing Director", "Fleet Operations Director"],
+                "icp_titles": ["VP Logistics", "Director of Supply Chain", "Head of Freight Brokerage", "Managing Director", "Fleet Operations Director"],
+                "product_name": "Harvey AI",
+                "product_description": "Shipper RFP outreach and freight quotation follow-up acceleration assistant",
+                "qualification_questions": ["What TMS do you run?", "What are your primary lanes and equipment types?"],
+                "scoring_criteria": {"min_score": 60, "require_decision_maker": True},
+                "products_services": ["Shipper Account Acquisition Agent", "Freight Quote & RFP Proposal Chase Assistant"],
+                "pain_points": ["Slow spot-quote response allowing competing brokers to win freight", "Empty backhauls and lane imbalance", "High cost of manual shipper prospecting"],
+                "buying_signals": ["Expanding fleet size", "New warehouse locations", "Awarded logistics broker licenses"],
+                "messaging_rules": {"tone": "direct", "focus": "lane freight booking speed and shipper account expansion", "forbidden_terms": ["patient", "clinical", "clinic", "dental"]},
+                "target_criteria": {"min_score": 60, "require_decision_maker": True},
+                "is_default": 0,
+            },
+            # 12. Construction and Infrastructure
+            {
+                "id": "prof_construction_infra",
+                "name": "Commercial Construction & Infrastructure",
+                "industry": "Construction and Infrastructure",
+                "subcategory": "Commercial General Contracting, Civil Works & Structural Engineering",
+                "business_type": "General Contractor / Civil Engineering Builder",
+                "target_customer_profile": "Commercial general contractors, civil engineering infrastructure firms, and specialty trade builders",
+                "company_size": "25-350 employees",
+                "geography": "Regional Metro Infrastructure & Commercial Corridors",
+                "geography_scope": "regions",
+                "revenue_range": "$15M - $150M",
+                "decision_maker_roles": ["VP Construction", "Project Executive", "Director of Estimating", "Managing Principal", "Chief Estimator"],
+                "icp_titles": ["VP Construction", "Project Executive", "Director of Estimating", "Managing Principal", "Chief Estimator"],
+                "product_name": "Harvey AI",
+                "product_description": "Subcontractor bid invitation follow-up and commercial owner project intake assistant",
+                "qualification_questions": ["What project bonding capacity does the firm carry?", "Do you utilize Procore or Autodesk Construction Cloud?"],
+                "scoring_criteria": {"min_score": 60, "require_decision_maker": True},
+                "products_services": ["Subcontractor Bid Invitation Follow-Up", "Commercial Owner Project Intake Assistant"],
+                "pain_points": ["Low subcontractor bid coverage on major tenders", "Delayed follow-up on commercial owner negotiated bids", "Estimating team manual phone chasing burden"],
+                "buying_signals": ["Municipal bond contract awards", "Permit filings for new commercial towers", "Joint venture announcements"],
+                "messaging_rules": {"tone": "direct", "focus": "bid coverage and negotiated contract closing velocity", "forbidden_terms": ["patient", "clinical", "clinic", "dental"]},
+                "target_criteria": {"min_score": 60, "require_decision_maker": True},
+                "is_default": 0,
+            },
+            # 13. Automotive
+            {
+                "id": "prof_automotive",
+                "name": "Automotive Dealerships & Fleet Operations",
+                "industry": "Automotive",
+                "subcategory": "Commercial Fleet Dealerships, Auto Parts OEM & Heavy Vehicle Maintenance",
+                "business_type": "Automotive Group / Commercial Vehicle Dealership",
+                "target_customer_profile": "Commercial fleet sales divisions, heavy equipment dealers, and tier-2 auto parts suppliers",
+                "company_size": "20-200 employees",
+                "geography": "Regional Transportation Hubs & Automotive Industrial Zones",
+                "geography_scope": "regions",
+                "revenue_range": "$10M - $80M",
+                "decision_maker_roles": ["Commercial Fleet Director", "General Manager", "VP Automotive Sales", "Dealership Principal", "Parts Operations Director"],
+                "icp_titles": ["Commercial Fleet Director", "General Manager", "VP Automotive Sales", "Dealership Principal", "Parts Operations Director"],
+                "product_name": "Harvey AI",
+                "product_description": "Commercial vehicle fleet quote follow-up and corporate account retention assistant",
+                "qualification_questions": ["Do you handle municipal and commercial fleet leasing accounts?", "What DMS do you operate?"],
+                "scoring_criteria": {"min_score": 60, "require_decision_maker": True},
+                "products_services": ["Commercial Fleet Quote Follow-Up", "Wholesale Parts & Fleet Service Agreement Outreach"],
+                "pain_points": ["Fleet quote follow-up dropped during month-end sales rushes", "Corporate fleet replacement cycle tracking lag", "Wholesale parts accounts going dormant"],
+                "buying_signals": ["Fleet EV inventory arrivals", "New commercial franchise agreements", "Expansion of commercial service bays"],
+                "messaging_rules": {"tone": "consultative", "focus": "fleet delivery turnaround and commercial account retention", "forbidden_terms": ["patient", "clinical", "clinic", "dental"]},
+                "target_criteria": {"min_score": 60, "require_decision_maker": True},
+                "is_default": 0,
+            },
+            # 14. Agriculture
+            {
+                "id": "prof_agriculture",
+                "name": "Agribusiness & Precision Agricultural Inputs",
+                "industry": "Agriculture",
+                "subcategory": "Agri-Inputs, Precision Agriculture, Grain Storage & Equipment Dealerships",
+                "business_type": "Agribusiness Enterprise / Agricultural Supplier",
+                "target_customer_profile": "Commercial farm management companies, precision agritech dealers, and grain wholesale cooperatives",
+                "company_size": "15-150 employees",
+                "geography": "Agricultural Belts & Regional Wholesale Corridors",
+                "geography_scope": "regions",
+                "revenue_range": "$5M - $70M",
+                "decision_maker_roles": ["Agricultural Operations Director", "Farm General Manager", "VP Agribusiness", "Commercial Agronomist", "Managing Director"],
+                "icp_titles": ["Agricultural Operations Director", "Farm General Manager", "VP Agribusiness", "Commercial Agronomist", "Managing Director"],
+                "product_name": "Harvey AI",
+                "product_description": "Commercial grower contract outreach and agri-input distributor acquisition assistant",
+                "qualification_questions": ["What acreage or distribution territory does the company manage?", "Do you offer precision agronomy?"],
+                "scoring_criteria": {"min_score": 60, "require_decision_maker": True},
+                "products_services": ["Commercial Grower Contract Outreach", "Agri-Input Distributor Acquisition Assistant"],
+                "pain_points": ["Tight pre-season booking windows for inputs and equipment", "Dispersed rural client base difficult to contact by phone", "Grower contract renewals slipping to competitors"],
+                "buying_signals": ["Pre-season planting announcements", "Expansion of grain elevator capacity", "Precision drone/sensor partnerships"],
+                "messaging_rules": {"tone": "consultative", "focus": "seasonal contracting deadlines and grower partnership yield", "forbidden_terms": ["patient", "clinical", "clinic", "dental"]},
+                "target_criteria": {"min_score": 60, "require_decision_maker": True},
+                "is_default": 0,
+            },
+            # 15. Recruitment and HR
+            {
+                "id": "prof_recruitment_hr",
+                "name": "Executive Search & Talent Acquisition",
+                "industry": "Recruitment and HR",
+                "subcategory": "Executive Search, Technical Staffing & Recruitment Process Outsourcing (RPO)",
+                "business_type": "Talent Acquisition Agency / Executive Search Firm",
+                "target_customer_profile": "Retained executive search firms, technical contract staffing agencies, and boutique recruitment consultancies",
+                "company_size": "10-100 employees",
+                "geography": "Major Financial & Tech Employment Hubs",
+                "geography_scope": "worldwide",
+                "revenue_range": "$2M - $25M",
+                "decision_maker_roles": ["Managing Director", "VP Talent Acquisition", "Head of Search", "Practice Leader", "Agency Founder"],
+                "icp_titles": ["Managing Director", "VP Talent Acquisition", "Head of Search", "Practice Leader", "Agency Founder"],
+                "product_name": "Harvey AI",
+                "product_description": "Hiring manager client acquisition and search mandate briefing coordinator",
+                "qualification_questions": ["What recruiting specialization do you lead?", "Are searches conducted on a retained or contingent basis?"],
+                "scoring_criteria": {"min_score": 60, "require_decision_maker": True},
+                "products_services": ["Hiring Manager Client Acquisition", "Search Mandate Intake & Briefing Coordinator"],
+                "pain_points": ["Hiring manager ghosting on search mandate proposals", "Manual outbound BD eating into recruiter search delivery hours", "Job openings filled before agency contracts are signed"],
+                "buying_signals": ["Target client companies posting high-volume openings", "New VP/C-suite appointments", "Series A/B funding announcements"],
+                "messaging_rules": {"tone": "consultative", "focus": "time-to-fill and hiring manager relationship development", "forbidden_terms": ["patient", "clinical", "clinic", "dental"]},
+                "target_criteria": {"min_score": 60, "require_decision_maker": True},
+                "is_default": 0,
+            },
+            # 16. Marketing and Consulting Agencies
+            {
+                "id": "prof_marketing_consulting",
+                "name": "Performance Marketing & Strategic Advisory",
+                "industry": "Marketing and Consulting Agencies",
+                "subcategory": "Digital Performance Agencies, Brand Strategy & Management Consulting",
+                "business_type": "Strategic Marketing / Management Consulting Agency",
+                "target_customer_profile": "Digital marketing agencies, B2B growth consultancies, and management advisory boutiques",
+                "company_size": "10-120 employees",
+                "geography": "Global Creative & Financial Metro Centers",
+                "geography_scope": "worldwide",
+                "revenue_range": "$2M - $30M",
+                "decision_maker_roles": ["Agency Principal", "Managing Director", "VP Client Strategy", "Head of Business Development", "Partner"],
+                "icp_titles": ["Agency Principal", "Managing Director", "VP Client Strategy", "Head of Business Development", "Partner"],
+                "product_name": "Harvey AI",
+                "product_description": "Agency pitch consultation scheduling and RFP proposal follow-up assistant",
+                "qualification_questions": ["What is your typical monthly client retainer floor?", "Do you focus on performance marketing or brand strategy?"],
+                "scoring_criteria": {"min_score": 60, "require_decision_maker": True},
+                "products_services": ["Agency Pitch Consultation Scheduling", "RFP Proposal Follow-Up Assistant"],
+                "pain_points": ["Feast-or-famine agency new business pipeline", "High-value prospective clients stalling after initial proposal delivery", "Senior partners bogged down in cold prospecting"],
+                "buying_signals": ["Target client CMO transitions", "Brand repositioning campaigns", "Expanding marketing budgets"],
+                "messaging_rules": {"tone": "consultative", "focus": "new business pipeline consistency and pitch conversion", "forbidden_terms": ["patient", "clinical", "clinic", "dental"]},
+                "target_criteria": {"min_score": 60, "require_decision_maker": True},
+                "is_default": 0,
+            },
+            # 17. Professional and Business Services
+            {
+                "id": "prof_business_services",
+                "name": "Corporate Facilities & Managed Business Services",
+                "industry": "Professional and Business Services",
+                "subcategory": "Managed IT Services (MSP), Facility Compliance & Commercial Security",
+                "business_type": "B2B Managed Services Provider",
+                "target_customer_profile": "Commercial facility services, managed service providers (MSPs), and corporate compliance advisory",
+                "company_size": "15-180 employees",
+                "geography": "Regional Commercial Corridors & Corporate Parks",
+                "geography_scope": "regions",
+                "revenue_range": "$3M - $40M",
+                "decision_maker_roles": ["VP Commercial Services", "Director of Business Development", "General Manager", "COO", "Managing Director"],
+                "icp_titles": ["VP Commercial Services", "Director of Business Development", "General Manager", "COO", "Managing Director"],
+                "product_name": "Harvey AI",
+                "product_description": "Commercial service agreement outreach and contract proposal renewal assistant",
+                "qualification_questions": ["What is your service contract model (annual agreement, SLA)?", "What vertical industries represent your core accounts?"],
+                "scoring_criteria": {"min_score": 60, "require_decision_maker": True},
+                "products_services": ["Commercial Service Agreement Outreach", "Contract Proposal & Renewal Follow-Up Assistant"],
+                "pain_points": ["Multi-year service agreements lost due to slow proposal turnaround", "Manual prospecting across regional facility managers", "Dormant service accounts"],
+                "buying_signals": ["Corporate office expansions", "New commercial tenant move-ins", "Cybersecurity compliance mandates"],
+                "messaging_rules": {"tone": "consultative", "focus": "contract agreement value and operational reliability", "forbidden_terms": ["patient", "clinical", "clinic", "dental"]},
+                "target_criteria": {"min_score": 60, "require_decision_maker": True},
+                "is_default": 0,
+            },
+            # 18. Commercial HVAC & Facility Services (Home Services)
+            {
+                "id": "prof_home_services",
+                "name": "Commercial HVAC & Facility Services",
+                "industry": "Commercial & Home Services",
+                "subcategory": "Commercial Mechanical & Environmental Controls",
+                "business_type": "Commercial Contracting & MEP",
+                "target_customer_profile": "Facility maintenance, mechanical contractors, and commercial HVAC teams",
+                "company_size": "20-200 employees",
+                "geography": "Regional Commercial Service Areas",
+                "geography_scope": "regions",
+                "revenue_range": "$5M - $40M",
+                "decision_maker_roles": ["Owner", "VP Operations", "Commercial Service Director", "General Manager", "Estimating Director"],
+                "icp_titles": ["Owner", "VP Operations", "Commercial Service Director", "General Manager", "Estimating Director"],
+                "product_name": "Harvey AI",
+                "product_description": "Fast quote follow-up and commercial service agreement outreach assistant for facility and contracting teams",
+                "qualification_questions": ["Do you provide 24/7 commercial service?", "What is your typical maintenance agreement term?"],
+                "scoring_criteria": {"min_score": 60, "require_decision_maker": True},
+                "products_services": ["Quotation Follow-Up Automation", "Maintenance Renewal Assistant"],
+                "pain_points": ["Commercial contractors losing bids due to slow follow-up", "Preventative maintenance renewals slipping", "Manual estimating tracking burden"],
+                "buying_signals": ["Commercial building acquisitions", "Chiller plant retrofit permits", "Industrial park developments"],
+                "messaging_rules": {"tone": "direct", "focus": "estimate closing rates and preventative maintenance renewals", "forbidden_terms": ["patient", "clinical", "clinic", "dental"]},
+                "target_criteria": {"min_score": 60, "require_decision_maker": True},
+                "is_default": 0,
+            },
+        ]
+        for p in profiles:
             existing = await self.get_business_profile(p["id"])
-            if not existing:
+            if not existing or not existing.get("subcategory"):
+                await self.create_business_profile(p)
+            elif p.get("is_default") == 1 and not existing.get("is_default"):
+                # Ensure primary default is updated
                 await self.create_business_profile(p)
 
     async def delete_business_profile(self, profile_id: str) -> bool:

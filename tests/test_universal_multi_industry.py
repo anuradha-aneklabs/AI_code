@@ -117,7 +117,7 @@ async def test_create_and_delete_custom_profile(state_mgr):
 @pytest.mark.asyncio
 async def test_delete_default_profile_is_forbidden(state_mgr):
     with pytest.raises(ValueError, match="Cannot delete the default business profile"):
-        await state_mgr.delete_business_profile("prof_dental_in")
+        await state_mgr.delete_business_profile("prof_saas_global")
 
 
 # ── 2. Multi-Industry Sample Lead Discovery ──
@@ -189,15 +189,15 @@ async def test_discover_home_services_leads(discovery_provider):
 @pytest.mark.asyncio
 async def test_discover_generic_fallback(discovery_provider):
     profile = {
-        "id": "prof_robotics",
-        "industry": "Industrial Robotics & Automation",
+        "id": "prof_aerospace",
+        "industry": "Aerospace Avionics & Satellite Systems",
         "geography": "Detroit, Michigan",
-        "icp_titles": ["VP Automation", "Plant Manager"],
+        "icp_titles": ["VP Avionics", "Systems Director"],
     }
     leads = await discovery_provider.discover(profile, limit=2)
     assert len(leads) == 2
-    assert "Industrial Robotics & Automation" in leads[0].industry
-    assert leads[0].decision_maker["title"] in ["VP Automation", "Plant Manager", "Director"]
+    assert "Aerospace Avionics & Satellite Systems" in leads[0].industry
+    assert leads[0].decision_maker["title"] in ["VP Avionics", "Systems Director", "Director"]
 
 
 # ── 3. Lead Qualification Across Diverse ICPs ──
@@ -439,3 +439,65 @@ async def test_safety_invariants_preserved(state_mgr):
         cur.execute("SELECT id FROM outbox WHERE id = ?", (pid,))
         assert cur.fetchone() is not None, f"Pilot draft {pid} is missing!"
     con.close()
+
+
+# ── 7. Ten Universal Industry Vertical Tests ──
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "prof_id,expected_doc,is_healthcare",
+    [
+        ("prof_saas_global", "saas_product_guide.md", False),
+        ("prof_legal_services", "legal_product_guide.md", False),
+        ("prof_dental_in", "dental_product_guide.md", True),
+        ("prof_real_estate", "real_estate_product_guide.md", False),
+        ("prof_manufacturing", "manufacturing_product_guide.md", False),
+        ("prof_accounting_finance", "accounting_product_guide.md", False),
+        ("prof_hospitality_hotels", "hospitality_product_guide.md", False),
+        ("prof_logistics_transport", "logistics_product_guide.md", False),
+        ("prof_education_edtech", "education_product_guide.md", False),
+        ("prof_marketing_consulting", "marketing_product_guide.md", False),
+    ],
+)
+async def test_vertical_discovery_qualification_and_anticontamination(
+    state_mgr, discovery_provider, qualifier, campaign_gen, prof_id, expected_doc, is_healthcare
+):
+    profile = await state_mgr.get_business_profile(prof_id)
+    assert profile is not None, f"Missing profile {prof_id}"
+
+    # 1. Discover Leads
+    leads = await discovery_provider.discover(profile, limit=2)
+    assert len(leads) >= 1
+    lead = leads[0]
+
+    # 2. Qualify
+    res = qualifier.qualify(lead, profile)
+    assert res.score >= 50
+    assert res.tier in ["High Fit", "Medium Fit"]
+
+    # 3. Create prospect & craft sequence
+    comp = Company(name=lead.company_name, industry=lead.industry, location=lead.location)
+    prosp = Prospect(first_name="Alex", last_name="Taylor", email=lead.decision_maker.get("email", "a@test.com"), company=lead.company_name)
+
+    seq = campaign_gen._craft_sequence(
+        prospect=prosp,
+        company=comp,
+        profile=profile,
+        verified_facts=[],
+        missing_context=[],
+        rag_sources=[expected_doc],
+        steps_count=3,
+        step_delay_days=3,
+        tone="consultative",
+    )
+    assert len(seq) == 3
+
+    # 4. Anti-contamination test
+    all_text = " ".join(f"{s['subject']} {s['body']}" for s in seq).lower()
+    if not is_healthcare:
+        for forbidden in ["patient", "clinical", "clinic", "dental", "doctor", "dentist"]:
+            assert forbidden not in all_text, f"Contamination: {forbidden} leaked into {prof_id}"
+    else:
+        assert any(w in all_text for w in ["patient", "dental", "clinic"])
+

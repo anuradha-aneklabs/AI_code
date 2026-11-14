@@ -1679,7 +1679,7 @@ async def get_eligible_leads_for_campaign(profile_id: str | None = None):
 
         if not profile_id:
             profiles = await state.get_business_profiles()
-            profile_id = profiles[0]["id"] if profiles else "prof_dental_in"
+            profile_id = profiles[0]["id"] if profiles else "prof_saas_global"
 
         gen = CampaignGenerator(state=state)
         leads = await gen.get_eligible_leads(profile_id)
@@ -1696,7 +1696,6 @@ async def generate_campaign_preview_endpoint(request: Request):
         from harvey.campaign_generator import CampaignGenerator
 
         body = await request.json()
-        profile_id = body.get("profile_id") or "prof_dental_in"
         prospect_ids = body.get("prospect_ids") or []
 
         if not prospect_ids:
@@ -1704,6 +1703,10 @@ async def generate_campaign_preview_endpoint(request: Request):
 
         state = _state()
         await state.init_db()
+        profile_id = body.get("profile_id")
+        if not profile_id:
+            profiles = await state.get_business_profiles()
+            profile_id = profiles[0]["id"] if profiles else "prof_saas_global"
         gen = CampaignGenerator(state=state)
         preview = await gen.generate_campaign_preview(
             profile_id=profile_id,
@@ -2256,7 +2259,7 @@ async def start_discovery(request: Request):
                     await state.save_discovery_run({
                         "provider": provider,
                         "geography": ", ".join(body.get("cities") or ["Indore, India"]),
-                        "industry": config.icp.industries[0] if getattr(config.icp, "industries", None) else "dental",
+                        "industry": body.get("industry") or (config.icp.industries[0] if getattr(config.icp, "industries", None) else "IT, Software, SaaS and AI"),
                         "keywords": ", ".join(q.keyword() for q in queries),
                         "total_found": (result.discover or {}).get("found", 0),
                         "new_leads": (result.discover or {}).get("saved", 0),
@@ -2406,13 +2409,23 @@ async def get_discovery_criteria():
         profiles = await state.get_business_profiles()
         return {
             "industries": [
-                "Healthcare / Dental",
+                "IT, Software, SaaS and AI",
+                "Legal Services and Law Firms",
+                "Healthcare, Hospitals, Clinics and Diagnostics",
+                "Real Estate and Property",
+                "Manufacturing and Industrial",
+                "Finance, Accounting and Insurance",
+                "Education and EdTech",
+                "E-commerce and Retail",
+                "Hospitality, Hotels and Restaurants",
+                "Logistics and Transportation",
+                "Construction and Infrastructure",
+                "Automotive",
+                "Agriculture",
+                "Recruitment and HR",
+                "Marketing and Consulting Agencies",
+                "Professional and Business Services",
                 "CleanTech / Renewable Energy",
-                "B2B Enterprise SaaS",
-                "Commercial HVAC & Facilities",
-                "Legal Services / Corporate Law",
-                "Accounting & Tax Advisory",
-                "Specialized Medical Clinics",
             ],
             "company_sizes": [
                 "1-10 employees",
@@ -2574,7 +2587,7 @@ async def run_discovery_search(request: Request):
             profile["target_use_cases"] = body["use_cases"]
 
         if not profile.get("industry"):
-            profile["industry"] = "Healthcare / Dental"
+            profile["industry"] = "IT, Software, SaaS and AI"
         if not profile.get("id"):
             profile["id"] = profile_id or "custom_search"
 
@@ -2658,7 +2671,7 @@ async def run_sample_discovery(request: Request):
                 profile = profiles[0]
 
         if not profile.get("industry"):
-            profile["industry"] = "Healthcare / Dental"
+            profile["industry"] = "IT, Software, SaaS and AI"
         if not profile.get("id"):
             profile["id"] = profile_id or "default_sample"
 

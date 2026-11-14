@@ -376,20 +376,42 @@ class SampleLeadDiscoveryProvider(LeadDiscoveryProvider):
         industry = (profile.get("industry") or "").lower()
         geo = (profile.get("geography") or "").lower()
 
-        if "dent" in industry or "oral" in industry:
-            leads = self._dental_leads(profile)
+        if "educat" in industry or "edtech" in industry or "school" in industry or "universit" in industry or "college" in industry or "academ" in industry:
+            leads = self._education_leads(profile)
         elif "clean" in industry or "solar" in industry or "energy" in industry or "renew" in industry:
             leads = self._cleantech_leads(profile)
-        elif "saas" in industry or "soft" in industry or ("tech" in industry and "clean" not in industry):
-            leads = self._saas_leads(profile)
         elif "legal" in industry or "law" in industry or "attorney" in industry or "counsel" in industry:
             leads = self._legal_leads(profile)
-        elif "account" in industry or "cpa" in industry or "tax" in industry or "finance" in industry or "financial" in industry:
+        elif "real estate" in industry or "property" in industry or "realt" in industry or "brokerage" in industry:
+            leads = self._real_estate_leads(profile)
+        elif "manufactur" in industry or "industrial" in industry or "oem" in industry or "machin" in industry:
+            leads = self._manufacturing_leads(profile)
+        elif "account" in industry or "cpa" in industry or "tax" in industry or "finance" in industry or "financial" in industry or "insurance" in industry:
             leads = self._accounting_leads(profile)
-        elif "hvac" in industry or "home service" in industry or "facility" in industry or "contractor" in industry or "commercial service" in industry:
+        elif "hotel" in industry or "hospitality" in industry or "resort" in industry or "restaurant" in industry:
+            leads = self._hospitality_leads(profile)
+        elif "logistics" in industry or "transport" in industry or "freight" in industry or "carrier" in industry or "fleet" in industry:
+            leads = self._logistics_leads(profile)
+        elif "market" in industry or "agency" in industry or "consult" in industry or "advisory" in industry or "pr" in industry:
+            leads = self._marketing_agency_leads(profile)
+        elif "e-commerce" in industry or "ecommerce" in industry or "retail" in industry or "wholesale" in industry or "merchandis" in industry:
+            leads = self._ecommerce_leads(profile)
+        elif "construct" in industry or "infrastruct" in industry or "contractor" in industry or "builder" in industry or "civil" in industry:
+            leads = self._construction_leads(profile)
+        elif "auto" in industry or "motor" in industry or "vehicle" in industry or "dealership" in industry:
+            leads = self._automotive_leads(profile)
+        elif "agri" in industry or "farm" in industry or "crop" in industry or "grain" in industry:
+            leads = self._agriculture_leads(profile)
+        elif "recruit" in industry or "staffing" in industry or "talent" in industry or "hr" in industry or "human resources" in industry:
+            leads = self._recruitment_leads(profile)
+        elif "business service" in industry or "facility" in industry or "hvac" in industry or "home service" in industry or "msp" in industry:
             leads = self._home_services_leads(profile)
-        elif "clinic" in industry or "health" in industry or "medic" in industry:
+        elif "dent" in industry or "oral" in industry:
+            leads = self._dental_leads(profile)
+        elif "clinic" in industry or "health" in industry or "medic" in industry or "hospital" in industry or "diagnost" in industry:
             leads = self._clinic_leads(profile)
+        elif "saas" in industry or "soft" in industry or "ai" in industry or "cloud" in industry or "tech" in industry:
+            leads = self._saas_leads(profile)
         else:
             leads = self._generic_leads(profile)
 
@@ -1195,6 +1217,953 @@ class SampleLeadDiscoveryProvider(LeadDiscoveryProvider):
                 research_timestamp="2026-11-04T12:00:00Z",
                 confidence=0.88,
                 missing_fields=["exact_headcount", "private_phone"],
+                is_sample=True,
+            ),
+        ]
+
+    def _real_estate_leads(self, profile: dict[str, Any]) -> list[ResearchProfile]:
+        return [
+            ResearchProfile(
+                company_name="Highland Commercial Realty & Advisory",
+                domain="highlandcommercialrealty.com",
+                website="https://highlandcommercialrealty.com",
+                industry="Real Estate and Property",
+                location="Dallas, TX",
+                company_size="35-90 employees",
+                description="Commercial real estate brokerage specializing in prime industrial acquisitions, office leasing, and asset valuation.",
+                decision_maker={
+                    "name": "Victoria Sterling",
+                    "title": "Managing Principal & Broker-Owner",
+                    "email": "vsterling@highlandcommercialrealty.com",
+                    "email_status": "verified",
+                    "linkedin_url": "linkedin.com/in/victoriasterling-cre",
+                },
+                potential_needs=[
+                    "Commercial listing inquiry qualification and viewing coordination",
+                    "High-value prospective tenant intake triage",
+                ],
+                tech_stack=["CoStar", "LoopNet", "WordPress", "HubSpot"],
+                sources=[
+                    {"field": "company_name", "source": "texas_real_estate_commission", "verified": True},
+                    {"field": "decision_maker", "source": "brokerage_leadership_page", "verified": True},
+                    {"field": "domain", "source": "whois_dns", "verified": True},
+                ],
+                missing_fields=["annual_transaction_volume", "direct_cell"],
+                is_sample=True,
+            ),
+            ResearchProfile(
+                company_name="Beacon Multi-Family Property Group",
+                domain="beaconmultifamily.com",
+                website="https://beaconmultifamily.com",
+                industry="Real Estate and Property",
+                location="Atlanta, GA",
+                company_size="50-120 employees",
+                description="Multi-family residential portfolio management and commercial mixed-use leasing operators.",
+                decision_maker={
+                    "name": "David Callahan",
+                    "title": "VP Property Management",
+                    "email": "dcallahan@beaconmultifamily.com",
+                    "email_status": "verified",
+                    "linkedin_url": "linkedin.com/in/davidcallahan-pm",
+                },
+                potential_needs=[
+                    "Automated tenant lease renewal follow-up sequences",
+                    "Corporate inquiry coordination for commercial ground-floor suites",
+                ],
+                tech_stack=["Yardi Voyager", "RealPage", "Next.js"],
+                sources=[
+                    {"field": "company_name", "source": "georgia_property_owners_registry", "verified": True},
+                    {"field": "location", "source": "commercial_lease_register", "verified": True},
+                ],
+                missing_fields=["average_occupancy_rate", "emergency_dispatch_line"],
+                is_sample=True,
+            ),
+            ResearchProfile(
+                company_name="Metropolitan Real Estate Partners",
+                domain="metropartnersre.com",
+                website="https://metropartnersre.com",
+                industry="Real Estate and Property",
+                location="Chicago, IL",
+                company_size="20-45 employees",
+                description="Boutique investment sales and retail landlord representation firm in downtown Chicago.",
+                decision_maker={
+                    "name": "Marcus Vance",
+                    "title": "Director of Commercial Leasing",
+                    "email": "mvance@metropartnersre.com",
+                    "email_status": "verified",
+                    "linkedin_url": "linkedin.com/in/marcusvance-re",
+                },
+                potential_needs=[
+                    "Buyer and commercial tenant consultation scheduling",
+                    "Accelerating speed-to-lead for inbound property inquiries",
+                ],
+                tech_stack=["Webflow", "Buildium", "Google Analytics"],
+                sources=[
+                    {"field": "company_name", "source": "illinois_realtors_directory", "verified": True},
+                ],
+                missing_fields=["exact_square_footage", "personal_mobile"],
+                is_sample=True,
+            ),
+            ResearchProfile(
+                company_name="Solo Flat Rental Desk",
+                domain="flatrentalsolo.net",
+                website="https://flatrentalsolo.net",
+                industry="Residential Room Rental",
+                location="Miami, FL",
+                company_size="1 employee",
+                description="Solo individual room sublease listing board.",
+                decision_maker={
+                    "name": "Listing Desk",
+                    "title": "Desk Clerk",
+                    "email": "desk@flatrentalsolo.net",
+                    "email_status": "guess",
+                    "linkedin_url": "",
+                },
+                potential_needs=["Craigslist posting tool"],
+                tech_stack=["Static HTML"],
+                sources=[{"field": "company_name", "source": "whois_lookup", "verified": True}],
+                missing_fields=["broker_license", "phone", "managing_principal"],
+                is_sample=True,
+            ),
+        ]
+
+    def _manufacturing_leads(self, profile: dict[str, Any]) -> list[ResearchProfile]:
+        return [
+            ResearchProfile(
+                company_name="Precision Industrial Machining Corp",
+                domain="precisionmachiningcorp.com",
+                website="https://precisionmachiningcorp.com",
+                industry="Manufacturing and Industrial",
+                location="Cleveland, OH",
+                company_size="60-150 employees",
+                description="ISO 9001 and AS9100 certified CNC precision machining, tooling, and contract component manufacturer.",
+                decision_maker={
+                    "name": "Walter Jenkins",
+                    "title": "VP Operations",
+                    "email": "wjenkins@precisionmachiningcorp.com",
+                    "email_status": "verified",
+                    "linkedin_url": "linkedin.com/in/walterjenkins-mfg",
+                },
+                potential_needs=[
+                    "Industrial RFQ quotation follow-up acceleration",
+                    "Commercial supply contract renewal outreach",
+                ],
+                tech_stack=["JobBOSS", "Mastercam", "WordPress"],
+                sources=[
+                    {"field": "company_name", "source": "ohio_manufacturers_association", "verified": True},
+                    {"field": "decision_maker", "source": "plant_leadership_roster", "verified": True},
+                    {"field": "domain", "source": "whois_dns", "verified": True},
+                ],
+                missing_fields=["spindle_hours_capacity", "direct_extension"],
+                is_sample=True,
+            ),
+            ResearchProfile(
+                company_name="Apex Automation & Tooling Systems",
+                domain="apexautomationtool.com",
+                website="https://apexautomationtool.com",
+                industry="Manufacturing and Industrial",
+                location="Detroit, MI",
+                company_size="40-100 employees",
+                description="Custom automated robotic assembly cells and progressive stamping dies for tier-1 automotive suppliers.",
+                decision_maker={
+                    "name": "Elena Rostova",
+                    "title": "Plant Manager & Director of Manufacturing",
+                    "email": "elena@apexautomationtool.com",
+                    "email_status": "verified",
+                    "linkedin_url": "linkedin.com/in/elenarostova-automation",
+                },
+                potential_needs=[
+                    "Speed-to-lead for custom tooling bids and engineering estimates",
+                    "Re-engaging dormant OEM accounts for tooling maintenance",
+                ],
+                tech_stack=["SolidWorks", "Siemens PLM", "HubSpot"],
+                sources=[
+                    {"field": "company_name", "source": "michigan_industrial_directory", "verified": True},
+                    {"field": "location", "source": "facility_registry", "verified": True},
+                ],
+                missing_fields=["annual_tonnage", "private_mobile"],
+                is_sample=True,
+            ),
+            ResearchProfile(
+                company_name="Vanguard Custom Metal Fabricators",
+                domain="vanguardfabrication.com",
+                website="https://vanguardfabrication.com",
+                industry="Manufacturing and Industrial",
+                location="Milwaukee, WI",
+                company_size="25-70 employees",
+                description="Structural steel fabrication, laser cutting, and architectural metal assemblies.",
+                decision_maker={
+                    "name": "Carl Henderson",
+                    "title": "Director of Procurement & Estimating",
+                    "email": "chenderson@vanguardfabrication.com",
+                    "email_status": "verified",
+                    "linkedin_url": "linkedin.com/in/carlhenderson-fab",
+                },
+                potential_needs=[
+                    "Subcontractor bid chase automation for commercial structural bids",
+                ],
+                tech_stack=["Procore", "AutoCAD", "Wix"],
+                sources=[{"field": "company_name", "source": "fabricators_manufacturers_assoc", "verified": True}],
+                missing_fields=["crane_tonnage", "fax_number"],
+                is_sample=True,
+            ),
+            ResearchProfile(
+                company_name="Bob Garage Scraping",
+                domain="bobscrapemetal.net",
+                website="https://bobscrapemetal.net",
+                industry="Scrap Metal Collection",
+                location="Toledo, OH",
+                company_size="1 employee",
+                description="Solo local residential junk metal pickup service.",
+                decision_maker={
+                    "name": "Bob",
+                    "title": "Collector",
+                    "email": "bob@bobscrapemetal.net",
+                    "email_status": "guess",
+                    "linkedin_url": "",
+                },
+                potential_needs=["Scale calibration"],
+                tech_stack=["Static HTML"],
+                sources=[{"field": "company_name", "source": "local_flyer", "verified": True}],
+                missing_fields=["plant_manager", "phone", "iso_cert"],
+                is_sample=True,
+            ),
+        ]
+
+    def _hospitality_leads(self, profile: dict[str, Any]) -> list[ResearchProfile]:
+        return [
+            ResearchProfile(
+                company_name="The Grandview Luxury Boutique Hotel & Resort",
+                domain="grandviewhotelresort.com",
+                website="https://grandviewhotelresort.com",
+                industry="Hospitality, Hotels and Restaurants",
+                location="Aspen, CO",
+                company_size="50-180 employees",
+                description="Four-star alpine boutique resort featuring 120 guest suites, conference facilities, and farm-to-table dining.",
+                decision_maker={
+                    "name": "Jean-Luc Moreau",
+                    "title": "General Manager",
+                    "email": "jmoreau@grandviewhotelresort.com",
+                    "email_status": "verified",
+                    "linkedin_url": "linkedin.com/in/jeanlucmoreau-hotel",
+                },
+                potential_needs=[
+                    "Corporate offsite and executive retreat inquiry qualification",
+                    "Private banquet and wedding event booking follow-up automation",
+                ],
+                tech_stack=["Opera PMS", "SevenRooms", "WordPress"],
+                sources=[
+                    {"field": "company_name", "source": "colorado_hotel_lodging_assoc", "verified": True},
+                    {"field": "decision_maker", "source": "resort_executive_directory", "verified": True},
+                    {"field": "domain", "source": "whois_dns", "verified": True},
+                ],
+                missing_fields=["revpar_metrics", "direct_concierge_mobile"],
+                is_sample=True,
+            ),
+            ResearchProfile(
+                company_name="Metropolitan Hospitality & Events Group",
+                domain="metrohospitalitygroup.com",
+                website="https://metrohospitalitygroup.com",
+                industry="Hospitality, Hotels and Restaurants",
+                location="New York, NY",
+                company_size="70-220 employees",
+                description="Multi-venue hospitality group operating corporate conference dining spaces and high-volume banquet halls in Manhattan.",
+                decision_maker={
+                    "name": "Sophia Chen",
+                    "title": "Director of Sales & Events",
+                    "email": "schen@metrohospitalitygroup.com",
+                    "email_status": "verified",
+                    "linkedin_url": "linkedin.com/in/sophiachen-events",
+                },
+                potential_needs=[
+                    "Accelerating response time for corporate event and gala RFPs",
+                    "Automated follow-up cadence for recurring quarterly corporate catering",
+                ],
+                tech_stack=["Tripleseat", "Toast POS", "Webflow"],
+                sources=[
+                    {"field": "company_name", "source": "nyc_hospitality_alliance", "verified": True},
+                    {"field": "location", "source": "commercial_lease_registry", "verified": True},
+                ],
+                missing_fields=["catering_liquor_license_expiry", "private_phone"],
+                is_sample=True,
+            ),
+            ResearchProfile(
+                company_name="Coastal Breeze Resorts & Dining",
+                domain="coastalbreezeresorts.com",
+                website="https://coastalbreezeresorts.com",
+                industry="Hospitality, Hotels and Restaurants",
+                location="Miami, FL",
+                company_size="30-90 employees",
+                description="Oceanfront boutique resort offering corporate executive retreats and private dining pavilions.",
+                decision_maker={
+                    "name": "Carlos Mendez",
+                    "title": "VP Hospitality Operations",
+                    "email": "cmendez@coastalbreezeresorts.com",
+                    "email_status": "verified",
+                    "linkedin_url": "linkedin.com/in/carlosmendez-hospitality",
+                },
+                potential_needs=[
+                    "Group booking inquiry qualification and seasonal promotional follow-ups",
+                ],
+                tech_stack=["Cloudbeds", "OpenTable", "Squarespace"],
+                sources=[{"field": "company_name", "source": "florida_restaurant_lodging_assoc", "verified": True}],
+                missing_fields=["total_room_count", "direct_cell"],
+                is_sample=True,
+            ),
+            ResearchProfile(
+                company_name="Dan Bed and Breakfast",
+                domain="danbandb.net",
+                website="https://danbandb.net",
+                industry="Budget B&B",
+                location="Tampa, FL",
+                company_size="1 employee",
+                description="Solo two-bedroom bed and breakfast homestay.",
+                decision_maker={
+                    "name": "Dan",
+                    "title": "Owner",
+                    "email": "dan@danbandb.net",
+                    "email_status": "guess",
+                    "linkedin_url": "",
+                },
+                potential_needs=["Brochure printing"],
+                tech_stack=["Static HTML"],
+                sources=[{"field": "company_name", "source": "local_directory", "verified": True}],
+                missing_fields=["general_manager", "phone", "event_coordinator"],
+                is_sample=True,
+            ),
+        ]
+
+    def _logistics_leads(self, profile: dict[str, Any]) -> list[ResearchProfile]:
+        return [
+            ResearchProfile(
+                company_name="Apex Freight Solutions & Logistics",
+                domain="apexfreightlogistics.com",
+                website="https://apexfreightlogistics.com",
+                industry="Logistics and Transportation",
+                location="Chicago, IL",
+                company_size="45-130 employees",
+                description="Third-party logistics provider and non-asset freight brokerage handling dry van, refrigerated, and flatbed transport across North America.",
+                decision_maker={
+                    "name": "Richard Reynolds",
+                    "title": "VP Logistics & Carrier Procurement",
+                    "email": "rreynolds@apexfreightlogistics.com",
+                    "email_status": "verified",
+                    "linkedin_url": "linkedin.com/in/richardreynolds-freight",
+                },
+                potential_needs=[
+                    "Shipper spot-quote follow-up speed to increase RFP win rate",
+                    "Re-engaging dormant enterprise shipper accounts for dedicated lane volume",
+                ],
+                tech_stack=["McLeod Software", "DAT One", "WordPress", "HubSpot"],
+                sources=[
+                    {"field": "company_name", "source": "transportation_intermediaries_assoc", "verified": True},
+                    {"field": "decision_maker", "source": "carrier_procurement_roster", "verified": True},
+                    {"field": "domain", "source": "whois_dns", "verified": True},
+                ],
+                missing_fields=["annual_load_volume", "dispatch_direct_radio"],
+                is_sample=True,
+            ),
+            ResearchProfile(
+                company_name="TransGlobal Third-Party Logistics (3PL)",
+                domain="transglobal3pl.com",
+                website="https://transglobal3pl.com",
+                industry="Logistics and Transportation",
+                location="Dallas, TX",
+                company_size="60-180 employees",
+                description="Contract warehousing, fulfillment, and cross-docking operations serving e-commerce and retail distributors.",
+                decision_maker={
+                    "name": "Maria Santos",
+                    "title": "Director of Supply Chain Solutions",
+                    "email": "msantos@transglobal3pl.com",
+                    "email_status": "verified",
+                    "linkedin_url": "linkedin.com/in/mariasantos-3pl",
+                },
+                potential_needs=[
+                    "Prospective shipper warehouse intake qualification",
+                    "Automated follow-up on fulfillment and storage proposals",
+                ],
+                tech_stack=["Manhattan Associates", "HighJump WMS", "Webflow"],
+                sources=[
+                    {"field": "company_name", "source": "international_warehouse_logistics_assoc", "verified": True},
+                    {"field": "location", "source": "commercial_facility_register", "verified": True},
+                ],
+                missing_fields=["dock_door_count", "private_mobile"],
+                is_sample=True,
+            ),
+            ResearchProfile(
+                company_name="Interstate Haulage & Intermodal Carriers",
+                domain="interstatehaulage.com",
+                website="https://interstatehaulage.com",
+                industry="Logistics and Transportation",
+                location="Memphis, TN",
+                company_size="35-90 employees",
+                description="Regional intermodal container haulage and dedicated fleet transport across southern rail terminals.",
+                decision_maker={
+                    "name": "Kenneth Brooks",
+                    "title": "Head of Freight Operations",
+                    "email": "kbrooks@interstatehaulage.com",
+                    "email_status": "verified",
+                    "linkedin_url": "linkedin.com/in/kennethbrooks-trucking",
+                },
+                potential_needs=[
+                    "Dedicated lane contract proposal tracking and freight rate renewals",
+                ],
+                tech_stack=["TMW Systems", "Samsara", "Squarespace"],
+                sources=[{"field": "company_name", "source": "american_trucking_associations", "verified": True}],
+                missing_fields=["dot_safety_score", "cell_extension"],
+                is_sample=True,
+            ),
+            ResearchProfile(
+                company_name="Joe Single Truck Hauling",
+                domain="joetruck.net",
+                website="https://joetruck.net",
+                industry="Owner Operator",
+                location="Omaha, NE",
+                company_size="1 employee",
+                description="Solo owner-operator box truck delivery driver.",
+                decision_maker={
+                    "name": "Joe",
+                    "title": "Driver",
+                    "email": "joe@joetruck.net",
+                    "email_status": "guess",
+                    "linkedin_url": "",
+                },
+                potential_needs=["Fuel discount card"],
+                tech_stack=["Static HTML"],
+                sources=[{"field": "company_name", "source": "loadboard_free", "verified": True}],
+                missing_fields=["fleet_manager", "phone", "mc_authority"],
+                is_sample=True,
+            ),
+        ]
+
+    def _education_leads(self, profile: dict[str, Any]) -> list[ResearchProfile]:
+        return [
+            ResearchProfile(
+                company_name="Horizon Executive Learning Institute",
+                domain="horizonexecutivelearning.org",
+                website="https://horizonexecutivelearning.org",
+                industry="Education and EdTech",
+                location="Boston, MA",
+                company_size="40-110 employees",
+                description="Postgraduate executive education and professional leadership certifications for mid-career corporate executives.",
+                decision_maker={
+                    "name": "Dr. Evelyn Vance",
+                    "title": "Dean of Executive Programs",
+                    "email": "evance@horizonexecutivelearning.org",
+                    "email_status": "verified",
+                    "linkedin_url": "linkedin.com/in/evelynvance-edu",
+                },
+                potential_needs=[
+                    "Executive candidate application qualification and advisory triage",
+                    "Corporate enterprise sponsorship outreach and partnership follow-up",
+                ],
+                tech_stack=["Canvas LMS", "Salesforce Education Cloud", "WordPress"],
+                sources=[
+                    {"field": "company_name", "source": "massachusetts_dept_higher_ed", "verified": True},
+                    {"field": "decision_maker", "source": "faculty_leadership_roster", "verified": True},
+                    {"field": "domain", "source": "whois_dns", "verified": True},
+                ],
+                missing_fields=["annual_endowment", "direct_office_mobile"],
+                is_sample=True,
+            ),
+            ResearchProfile(
+                company_name="Apex Tech Academy & Professional Training",
+                domain="apextechacademy.com",
+                website="https://apextechacademy.com",
+                industry="Education and EdTech",
+                location="San Francisco, CA",
+                company_size="30-80 employees",
+                description="Immersive software engineering, data science, and cloud architecture bootcamps and corporate reskilling programs.",
+                decision_maker={
+                    "name": "Jason Patel",
+                    "title": "Director of Admissions & Enrollment",
+                    "email": "jason@apextechacademy.com",
+                    "email_status": "verified",
+                    "linkedin_url": "linkedin.com/in/jasonpatel-edtech",
+                },
+                potential_needs=[
+                    "Prospective student inquiry qualification to reduce admissions drop-off",
+                    "Automated interview booking workflows for qualified applicants",
+                ],
+                tech_stack=["HubSpot", "Thinkific", "Next.js"],
+                sources=[
+                    {"field": "company_name", "source": "california_postsecondary_directory", "verified": True},
+                    {"field": "location", "source": "campus_lease_registry", "verified": True},
+                ],
+                missing_fields=["graduation_employment_rate", "private_phone"],
+                is_sample=True,
+            ),
+            ResearchProfile(
+                company_name="Midwest University Global Studies",
+                domain="midwestglobalstudies.edu",
+                website="https://midwestglobalstudies.edu",
+                industry="Education and EdTech",
+                location="Chicago, IL",
+                company_size="80-250 employees",
+                description="Higher education international exchange programs and foreign university academic partnerships.",
+                decision_maker={
+                    "name": "Dr. Margaret Shaw",
+                    "title": "VP Academic Partnerships",
+                    "email": "mshaw@midwestglobalstudies.edu",
+                    "email_status": "verified",
+                    "linkedin_url": "linkedin.com/in/margaretshaw-academic",
+                },
+                potential_needs=[
+                    "International institution partnership inquiries and MOU follow-up",
+                ],
+                tech_stack=["Banner SIS", "Blackboard", "Drupal"],
+                sources=[{"field": "company_name", "source": "us_dept_of_education_database", "verified": True}],
+                missing_fields=["international_tuition_rates", "office_direct_dial"],
+                is_sample=True,
+            ),
+            ResearchProfile(
+                company_name="Sam Home Math Tutor",
+                domain="samtutoring.net",
+                website="https://samtutoring.net",
+                industry="Private Tutoring",
+                location="Austin, TX",
+                company_size="1 employee",
+                description="Solo home high school algebra and geometry tutor.",
+                decision_maker={
+                    "name": "Sam",
+                    "title": "Tutor",
+                    "email": "sam@samtutoring.net",
+                    "email_status": "guess",
+                    "linkedin_url": "",
+                },
+                potential_needs=["Whiteboard markers"],
+                tech_stack=["Static HTML"],
+                sources=[{"field": "company_name", "source": "community_bulletin", "verified": True}],
+                missing_fields=["dean_of_admissions", "phone", "accreditation"],
+                is_sample=True,
+            ),
+        ]
+
+    def _marketing_agency_leads(self, profile: dict[str, Any]) -> list[ResearchProfile]:
+        return [
+            ResearchProfile(
+                company_name="Catalyst Growth Marketing & Performance Group",
+                domain="catalystgrowthagency.com",
+                website="https://catalystgrowthagency.com",
+                industry="Marketing and Consulting Agencies",
+                location="New York, NY",
+                company_size="25-75 employees",
+                description="B2B growth agency specializing in paid acquisition, conversion rate optimization, and ABM pipeline generation for enterprise tech.",
+                decision_maker={
+                    "name": "Rachel Sterling",
+                    "title": "Managing Director & Agency Principal",
+                    "email": "rachel@catalystgrowthagency.com",
+                    "email_status": "verified",
+                    "linkedin_url": "linkedin.com/in/rachelsterling-growth",
+                },
+                potential_needs=[
+                    "Prospective brand pitch qualification and consultation booking",
+                    "RFP proposal follow-up coordination to shorten agency sales cycles",
+                ],
+                tech_stack=["Webflow", "HubSpot CRM", "Google Tag Manager", "Mixpanel"],
+                sources=[
+                    {"field": "company_name", "source": "american_association_advertising_agencies", "verified": True},
+                    {"field": "decision_maker", "source": "agency_partner_roster", "verified": True},
+                    {"field": "domain", "source": "whois_dns", "verified": True},
+                ],
+                missing_fields=["monthly_retainer_floor", "personal_mobile"],
+                is_sample=True,
+            ),
+            ResearchProfile(
+                company_name="Apex Digital Performance Partners",
+                domain="apexdigitalpartners.io",
+                website="https://apexdigitalpartners.io",
+                industry="Marketing and Consulting Agencies",
+                location="San Francisco, CA",
+                company_size="35-90 employees",
+                description="Full-funnel digital marketing, organic search architecture, and demand generation consulting for venture-backed SaaS.",
+                decision_maker={
+                    "name": "Marcus Lee",
+                    "title": "VP Client Strategy & BD",
+                    "email": "mlee@apexdigitalpartners.io",
+                    "email_status": "verified",
+                    "linkedin_url": "linkedin.com/in/marcuslee-digital",
+                },
+                potential_needs=[
+                    "Automating follow-up on pitch decks and client proposals",
+                    "Qualifying prospective brand inquiries against agency retainer minimums",
+                ],
+                tech_stack=["WordPress", "Clearbit", "Segment", "Slack"],
+                sources=[
+                    {"field": "company_name", "source": "bay_area_marketing_association", "verified": True},
+                    {"field": "location", "source": "commercial_lease_register", "verified": True},
+                ],
+                missing_fields=["annual_billings", "direct_line"],
+                is_sample=True,
+            ),
+            ResearchProfile(
+                company_name="Elevation Brand Consulting & Creative",
+                domain="elevationbrandconsulting.com",
+                website="https://elevationbrandconsulting.com",
+                industry="Marketing and Consulting Agencies",
+                location="London, UK",
+                company_size="20-50 employees",
+                description="Corporate brand positioning, executive communication advisory, and investor relations creative boutique.",
+                decision_maker={
+                    "name": "Oliver Wright",
+                    "title": "Partner & Head of Growth",
+                    "email": "owright@elevationbrandconsulting.com",
+                    "email_status": "verified",
+                    "linkedin_url": "linkedin.com/in/oliverwright-branding",
+                },
+                potential_needs=[
+                    "Prospective client discovery consultation scheduling and follow-up",
+                ],
+                tech_stack=["Framer", "Typeform", "Asana"],
+                sources=[{"field": "company_name", "source": "design_business_association_uk", "verified": True}],
+                missing_fields=["portfolio_awards", "direct_cell"],
+                is_sample=True,
+            ),
+            ResearchProfile(
+                company_name="One Man Social Postings",
+                domain="onemansocial.net",
+                website="https://onemansocial.net",
+                industry="Freelance Social Media",
+                location="Phoenix, AZ",
+                company_size="1 employee",
+                description="Solo freelance social media graphic posting service.",
+                decision_maker={
+                    "name": "Jack",
+                    "title": "Freelancer",
+                    "email": "jack@onemansocial.net",
+                    "email_status": "guess",
+                    "linkedin_url": "",
+                },
+                potential_needs=["Canva template pack"],
+                tech_stack=["Static HTML"],
+                sources=[{"field": "company_name", "source": "classifieds", "verified": True}],
+                missing_fields=["agency_principal", "phone", "client_roster"],
+                is_sample=True,
+            ),
+        ]
+
+    def _ecommerce_leads(self, profile: dict[str, Any]) -> list[ResearchProfile]:
+        return [
+            ResearchProfile(
+                company_name="Lumina Consumer Brands & Distribution",
+                domain="luminabrands.com",
+                website="https://luminabrands.com",
+                industry="E-commerce and Retail",
+                location="Los Angeles, CA",
+                company_size="30-100 employees",
+                description="Omnichannel lifestyle consumer goods brand retailing across direct-to-consumer and national retail department stores.",
+                decision_maker={
+                    "name": "Chloe Bennett",
+                    "title": "VP E-commerce & Wholesale Accounts",
+                    "email": "cbennett@luminabrands.com",
+                    "email_status": "verified",
+                    "linkedin_url": "linkedin.com/in/chloebennett-retail",
+                },
+                potential_needs=[
+                    "Independent boutique and regional department store wholesale outreach",
+                    "Seasonal reorder follow-up automation for existing retail stockists",
+                ],
+                tech_stack=["Shopify Plus", "Klaviyo", "Netsuite ERP"],
+                sources=[
+                    {"field": "company_name", "source": "national_retail_federation", "verified": True},
+                    {"field": "decision_maker", "source": "brand_wholesale_portal", "verified": True},
+                ],
+                missing_fields=["annual_gmv", "direct_extension"],
+                is_sample=True,
+            ),
+            ResearchProfile(
+                company_name="Apex Wholesale Goods & Retail Merchandising",
+                domain="apexwholesalegoods.com",
+                website="https://apexwholesalegoods.com",
+                industry="E-commerce and Retail",
+                location="Seattle, WA",
+                company_size="45-120 employees",
+                description="B2B wholesale distributor supplying regional supermarkets and specialty retailers with organic packaged foods.",
+                decision_maker={
+                    "name": "Trevor Scott",
+                    "title": "Director of Retail Accounts",
+                    "email": "tscott@apexwholesalegoods.com",
+                    "email_status": "verified",
+                    "linkedin_url": "linkedin.com/in/trevorscott-merchandising",
+                },
+                potential_needs=[
+                    "Prospective retail grocery buyer inquiry qualification",
+                    "Automating catalog distribution and pricing follow-ups",
+                ],
+                tech_stack=["BigCommerce", "Fishbowl Inventory", "WordPress"],
+                sources=[{"field": "company_name", "source": "wholesale_distributors_association", "verified": True}],
+                missing_fields=["pallet_order_minimums", "cell_number"],
+                is_sample=True,
+            ),
+        ]
+
+    def _construction_leads(self, profile: dict[str, Any]) -> list[ResearchProfile]:
+        return [
+            ResearchProfile(
+                company_name="Keystone Commercial Builders & Contractors",
+                domain="keystonebuilders.com",
+                website="https://keystonebuilders.com",
+                industry="Construction and Infrastructure",
+                location="Denver, CO",
+                company_size="50-160 employees",
+                description="General contractor specializing in commercial office towers, healthcare facilities, and civil infrastructure projects.",
+                decision_maker={
+                    "name": "Frank Miller",
+                    "title": "VP Construction & Project Executive",
+                    "email": "fmiller@keystonebuilders.com",
+                    "email_status": "verified",
+                    "linkedin_url": "linkedin.com/in/frankmiller-construction",
+                },
+                potential_needs=[
+                    "Subcontractor bid invitation follow-up and tender qualification",
+                    "Commercial owner negotiated project consultation follow-ups",
+                ],
+                tech_stack=["Procore", "Bluebeam", "Autodesk Construction Cloud"],
+                sources=[
+                    {"field": "company_name", "source": "associated_general_contractors", "verified": True},
+                    {"field": "decision_maker", "source": "project_executive_roster", "verified": True},
+                ],
+                missing_fields=["bonding_single_limit", "field_radio_direct"],
+                is_sample=True,
+            ),
+            ResearchProfile(
+                company_name="Pinnacle Infrastructure & Civil Engineering",
+                domain="pinnacleinfrastructure.com",
+                website="https://pinnacleinfrastructure.com",
+                industry="Construction and Infrastructure",
+                location="Atlanta, GA",
+                company_size="60-200 employees",
+                description="Heavy civil engineering contractor focused on bridge construction, municipal utilities, and highway paving.",
+                decision_maker={
+                    "name": "Nathan Drake",
+                    "title": "Director of Estimating",
+                    "email": "ndrake@pinnacleinfrastructure.com",
+                    "email_status": "verified",
+                    "linkedin_url": "linkedin.com/in/nathandrake-civil",
+                },
+                potential_needs=[
+                    "Municipal tender proposal tracking and specialty subcontractor chase",
+                ],
+                tech_stack=["HeavyBid", "Primavera P6", "WordPress"],
+                sources=[{"field": "company_name", "source": "civil_contractors_federation", "verified": True}],
+                missing_fields=["fleet_heavy_machinery_count", "direct_mobile"],
+                is_sample=True,
+            ),
+        ]
+
+    def _automotive_leads(self, profile: dict[str, Any]) -> list[ResearchProfile]:
+        return [
+            ResearchProfile(
+                company_name="Apex Commercial Fleet Solutions & Dealerships",
+                domain="apexfleetdealers.com",
+                website="https://apexfleetdealers.com",
+                industry="Automotive",
+                location="Indianapolis, IN",
+                company_size="40-120 employees",
+                description="Commercial vehicle dealership and fleet leasing provider for municipal utilities, delivery companies, and contractors.",
+                decision_maker={
+                    "name": "Brian O'Connor",
+                    "title": "Commercial Fleet Sales Director",
+                    "email": "brian@apexfleetdealers.com",
+                    "email_status": "verified",
+                    "linkedin_url": "linkedin.com/in/brianoconnor-fleet",
+                },
+                potential_needs=[
+                    "Commercial fleet lease quotation follow-up acceleration",
+                    "Tracking replacement vehicle procurement cycles for corporate accounts",
+                ],
+                tech_stack=["CDK Global", "Reynolds and Reynolds", "WordPress"],
+                sources=[
+                    {"field": "company_name", "source": "national_auto_dealers_association", "verified": True},
+                    {"field": "decision_maker", "source": "commercial_sales_roster", "verified": True},
+                ],
+                missing_fields=["inventory_chassis_count", "desk_extension"],
+                is_sample=True,
+            ),
+            ResearchProfile(
+                company_name="Precision Auto Parts & OEM Supply",
+                domain="precisionautopartsoem.com",
+                website="https://precisionautopartsoem.com",
+                industry="Automotive",
+                location="Detroit, MI",
+                company_size="55-140 employees",
+                description="Tier-2 manufacturer of braking assemblies, powertrain components, and remanufactured electrical auto systems.",
+                decision_maker={
+                    "name": "Diane Walker",
+                    "title": "VP Automotive Operations",
+                    "email": "dwalker@precisionautopartsoem.com",
+                    "email_status": "verified",
+                    "linkedin_url": "linkedin.com/in/dianewalker-autoparts",
+                },
+                potential_needs=[
+                    "OEM supply agreement follow-ups and automotive distributor outreach",
+                ],
+                tech_stack=["SAP ERP", "Siemens NX", "Webflow"],
+                sources=[{"field": "company_name", "source": "automotive_aftermarket_association", "verified": True}],
+                missing_fields=["iatf_16949_audit_status", "private_phone"],
+                is_sample=True,
+            ),
+        ]
+
+    def _agriculture_leads(self, profile: dict[str, Any]) -> list[ResearchProfile]:
+        return [
+            ResearchProfile(
+                company_name="Midwest Agronomic Inputs & Crop Advisory",
+                domain="midwestagronomic.com",
+                website="https://midwestagronomic.com",
+                industry="Agriculture",
+                location="Des Moines, IA",
+                company_size="30-90 employees",
+                description="Commercial crop nutrition, certified seed distribution, and soil microbiome advisory serving commercial grain producers.",
+                decision_maker={
+                    "name": "Douglas Campbell",
+                    "title": "Agricultural Operations Director",
+                    "email": "dcampbell@midwestagronomic.com",
+                    "email_status": "verified",
+                    "linkedin_url": "linkedin.com/in/douglascampbell-agri",
+                },
+                potential_needs=[
+                    "Pre-season commercial grower contract booking and seed order follow-ups",
+                    "Distributor onboarding across regional agricultural retail cooperatives",
+                ],
+                tech_stack=["AgVend", "Climate FieldView", "WordPress"],
+                sources=[
+                    {"field": "company_name", "source": "iowa_agribusiness_association", "verified": True},
+                    {"field": "decision_maker", "source": "agronomy_staff_directory", "verified": True},
+                ],
+                missing_fields=["total_managed_acreage", "direct_mobile"],
+                is_sample=True,
+            ),
+            ResearchProfile(
+                company_name="Apex Grain Storage & Cooperative Wholesalers",
+                domain="apexgraincoop.com",
+                website="https://apexgraincoop.com",
+                industry="Agriculture",
+                location="Fargo, ND",
+                company_size="40-110 employees",
+                description="Regional grain elevator, bulk grain storage, and commodity merchandising cooperative for soybean and wheat growers.",
+                decision_maker={
+                    "name": "Harold Miller",
+                    "title": "General Manager & VP Agribusiness",
+                    "email": "hmiller@apexgraincoop.com",
+                    "email_status": "verified",
+                    "linkedin_url": "linkedin.com/in/haroldmiller-grain",
+                },
+                potential_needs=[
+                    "Contract renewal outreach to commercial farm managers",
+                ],
+                tech_stack=["Kahler Automation", "AGRIS ERP", "Wix"],
+                sources=[{"field": "company_name", "source": "national_grain_feed_association", "verified": True}],
+                missing_fields=["elevator_bushel_capacity", "cell_phone"],
+                is_sample=True,
+            ),
+        ]
+
+    def _recruitment_leads(self, profile: dict[str, Any]) -> list[ResearchProfile]:
+        return [
+            ResearchProfile(
+                company_name="Vanguard Executive Search Partners",
+                domain="vanguardexecutivesearch.com",
+                website="https://vanguardexecutivesearch.com",
+                industry="Recruitment and HR",
+                location="New York, NY",
+                company_size="20-60 employees",
+                description="Retained executive search firm placing C-suite officers and board directors across technology, finance, and healthcare.",
+                decision_maker={
+                    "name": "Claire Harrington",
+                    "title": "Managing Director & Search Lead",
+                    "email": "charrington@vanguardexecutivesearch.com",
+                    "email_status": "verified",
+                    "linkedin_url": "linkedin.com/in/claireharrington-search",
+                },
+                potential_needs=[
+                    "Enterprise client company acquisition and search mandate intake",
+                    "Hiring manager proposal follow-ups to shorten mandate signing cycles",
+                ],
+                tech_stack=["Invenias", "Bullhorn", "WordPress"],
+                sources=[
+                    {"field": "company_name", "source": "association_executive_search_consultants", "verified": True},
+                    {"field": "decision_maker", "source": "search_partner_page", "verified": True},
+                ],
+                missing_fields=["average_search_fee", "direct_dial"],
+                is_sample=True,
+            ),
+            ResearchProfile(
+                company_name="Apex Technical Talent & Staffing Solutions",
+                domain="apextechtalent.com",
+                website="https://apextechtalent.com",
+                industry="Recruitment and HR",
+                location="Austin, TX",
+                company_size="35-95 employees",
+                description="Specialized contract engineering and technical staffing solutions for high-growth tech companies and enterprise IT.",
+                decision_maker={
+                    "name": "Sean Mitchell",
+                    "title": "VP Talent Acquisition Partnerships",
+                    "email": "smitchell@apextechtalent.com",
+                    "email_status": "verified",
+                    "linkedin_url": "linkedin.com/in/seanmitchell-staffing",
+                },
+                potential_needs=[
+                    "Technical hiring manager outreach to win exclusive contract staffing requisitions",
+                    "Automated interview briefing and candidate presentation follow-ups",
+                ],
+                tech_stack=["JobDiva", "LinkedIn Recruiter", "Webflow"],
+                sources=[{"field": "company_name", "source": "american_staffing_association", "verified": True}],
+                missing_fields=["active_contractor_bench", "private_cell"],
+                is_sample=True,
+            ),
+        ]
+
+    def _business_services_leads(self, profile: dict[str, Any]) -> list[ResearchProfile]:
+        return [
+            ResearchProfile(
+                company_name="Nexus Corporate Facilities & Managed Services",
+                domain="nexusmanagedservices.com",
+                website="https://nexusmanagedservices.com",
+                industry="Professional and Business Services",
+                location="Chicago, IL",
+                company_size="50-150 employees",
+                description="Integrated facility services, commercial energy management, and managed corporate building technology for office campuses.",
+                decision_maker={
+                    "name": "Karen Adams",
+                    "title": "VP Commercial Services",
+                    "email": "kadams@nexusmanagedservices.com",
+                    "email_status": "verified",
+                    "linkedin_url": "linkedin.com/in/karenadams-facility",
+                },
+                potential_needs=[
+                    "Multi-year commercial building service agreement proposal follow-up",
+                    "Corporate tenant move-in service intake coordination",
+                ],
+                tech_stack=["ServiceChannel", "Salesforce Service Cloud", "WordPress"],
+                sources=[
+                    {"field": "company_name", "source": "international_facility_management_assoc", "verified": True},
+                    {"field": "decision_maker", "source": "commercial_services_roster", "verified": True},
+                ],
+                missing_fields=["square_feet_managed", "direct_mobile"],
+                is_sample=True,
+            ),
+            ResearchProfile(
+                company_name="SecureShield Enterprise Protection & Security",
+                domain="secureshieldservices.com",
+                website="https://secureshieldservices.com",
+                industry="Professional and Business Services",
+                location="Dallas, TX",
+                company_size="40-110 employees",
+                description="Corporate security systems integration, cyber-physical access control, and compliance advisory for enterprise facilities.",
+                decision_maker={
+                    "name": "Anthony Rossi",
+                    "title": "Director of Business Development",
+                    "email": "arossi@secureshieldservices.com",
+                    "email_status": "verified",
+                    "linkedin_url": "linkedin.com/in/anthonyrossi-security",
+                },
+                potential_needs=[
+                    "Commercial facility security audit proposal follow-ups and agreement renewals",
+                ],
+                tech_stack=["LenelS2", "HubSpot", "Squarespace"],
+                sources=[{"field": "company_name", "source": "security_industry_association", "verified": True}],
+                missing_fields=["monitoring_station_cert", "cell_extension"],
                 is_sample=True,
             ),
         ]

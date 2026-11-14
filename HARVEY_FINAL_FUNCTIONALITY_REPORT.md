@@ -199,3 +199,4 @@ For full commercial deployment beyond local pilot evaluation, the system adminis
 1. Provide production API keys in `.env` for the desired external providers (e.g. Hunter.io, Serper, Cal.com).
 2. Configure Google Cloud Console / Azure Portal OAuth credentials if live inbox synchronization is required.
 3. Conduct initial batch outreach in supervised review mode before gradually adjusting the safe hold.
+
