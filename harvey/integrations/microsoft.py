@@ -62,14 +62,11 @@ INBOX_NEXT_LINK_PATHS = {
 # read fails, and sending is held, rather than acting on a partial inbox.
 MAX_INBOX_PAGES = 40
 LOGIN = "https://login.microsoftonline.com"
-SCOPE = (
-    "offline_access https://graph.microsoft.com/Mail.ReadWrite "
-    "https://graph.microsoft.com/Mail.Send https://graph.microsoft.com/User.Read"
-)
 READONLY_SCOPE = (
     "offline_access https://graph.microsoft.com/Mail.Read "
     "https://graph.microsoft.com/Calendars.Read https://graph.microsoft.com/User.Read"
 )
+SCOPE = READONLY_SCOPE
 LOOPBACK_PORT = 8766
 REPLY_WINDOW_DAYS = 7
 MAX_RETRY_AFTER_SECONDS = 10

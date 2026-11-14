@@ -170,3 +170,4 @@ The Harvey AI Sales Agent operates under hard-coded fail-safe controls:
 | **Email Verification** | ZeroBounce / Hunter / Reoon | IMPLEMENTED (BLOCKED) | **AWAITING CREDENTIALS** |
 | **Calendar Sync** | Cal.com / Calendly | IMPLEMENTED (BLOCKED) | **AWAITING CREDENTIALS** |
 | **Outbox Safety Gate** | Read-Only Pilot Hold | ENFORCED | **READY (SAFETY ACTIVE)** |
+
