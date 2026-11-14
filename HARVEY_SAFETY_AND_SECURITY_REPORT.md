@@ -1,7 +1,7 @@
 # Harvey AI Sales Agent — Safety Invariants & Security Architecture Report
 
 **Project Path:** `C:\Users\aneka\Desktop\harvey`  
-**Current Git Commit:** `43ccb56`  
+**Current Git Commit:** `bf7d437`  
 **Evaluation Date:** 2026-11-14  
 **Operating System:** Windows 11 Enterprise (Python 3.11.9, `.venv\Scripts\python.exe`)  
 **Safety Classification:** **READ-ONLY PILOT EVALUATION WITH STRICT GOVERNANCE**  

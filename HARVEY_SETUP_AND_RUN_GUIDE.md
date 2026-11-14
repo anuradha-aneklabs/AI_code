@@ -1,7 +1,7 @@
 # Harvey AI Sales Agent — Setup & Operator Run Guide
 
 **Project Path:** `C:\Users\aneka\Desktop\harvey`  
-**Current Git Commit:** `43ccb56`  
+**Current Git Commit:** `bf7d437`  
 **Platform:** Windows 11 Enterprise (Python 3.11.9, `.venv\Scripts\python.exe`)  
 **Dashboard URL:** `http://127.0.0.1:5555/`  
 

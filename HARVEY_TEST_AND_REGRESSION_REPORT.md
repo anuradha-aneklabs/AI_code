@@ -1,7 +1,7 @@
 # Harvey AI Sales Agent — Comprehensive Test & Regression Report
 
 **Project Path:** `C:\Users\aneka\Desktop\harvey`  
-**Current Git Commit:** `43ccb56`  
+**Current Git Commit:** `bf7d437`  
 **Execution Date:** 2026-11-14  
 **Python Environment:** Python 3.11.9 (`.venv\Scripts\python.exe`)  
 **Test Framework:** Pytest 8.x, Playwright 1.x, HTTPX 0.28  

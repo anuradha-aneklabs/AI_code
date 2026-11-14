@@ -1,7 +1,7 @@
 # Harvey AI Sales Agent — Provider Verification & Integration Report
 
 **Project Path:** `C:\Users\aneka\Desktop\harvey`  
-**Current Git Commit:** `43ccb56`  
+**Current Git Commit:** `bf7d437`  
 **Verification Date:** 2026-11-14  
 **Operating System:** Windows 11 Enterprise (Python 3.11.9, `.venv\Scripts\python.exe`)  
 **Target Node:** `http://127.0.0.1:5555/`  
