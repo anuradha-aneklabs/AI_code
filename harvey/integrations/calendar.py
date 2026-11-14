@@ -307,7 +307,7 @@ class CalendarClient:
         end_time_dt = now + timedelta(days=days_ahead)
 
         # 1. Try Cal.com API if credentials are provided
-        calcom_key = self.api_key or os.getenv("CALCOM_API_KEY") or os.getenv("CAL_COM_API_KEY") or ""
+        calcom_key = self.api_key or os.getenv("CALCOM_API_KEY") or os.getenv("CAL_COM_API_KEY") or os.getenv("CAL_API_KEY") or ""
         if calcom_key:
             event_types = await get_calcom_event_types(calcom_key)
             if event_types:

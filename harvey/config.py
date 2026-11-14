@@ -758,6 +758,10 @@ class EnvConfig(BaseModel):
     # Microsoft 365 (channels.email.provider: microsoft)
     m365_client_id: str = ""
     m365_tenant_id: str = ""
+    m365_client_secret: str = ""
+    # Calendar & meeting providers
+    calcom_api_key: str = ""
+    calendly_token: str = ""
     # Optional: only used when compliance.precleared.enabled is true.
     precleared_api_key: str = ""
     # AI Multi-Provider API keys
@@ -916,6 +920,16 @@ def load_env() -> EnvConfig:
         imap_password=os.getenv("IMAP_PASSWORD", "").strip(),
         m365_client_id=os.getenv("M365_CLIENT_ID", "").strip(),
         m365_tenant_id=os.getenv("M365_TENANT_ID", "").strip(),
+        m365_client_secret=os.getenv("M365_CLIENT_SECRET", "").strip(),
+        calcom_api_key=(
+            os.getenv("CALCOM_API_KEY", "").strip()
+            or os.getenv("CAL_COM_API_KEY", "").strip()
+            or os.getenv("CAL_API_KEY", "").strip()
+        ),
+        calendly_token=(
+            os.getenv("CALENDLY_TOKEN", "").strip()
+            or os.getenv("CALENDLY_API_KEY", "").strip()
+        ),
         precleared_api_key=os.getenv("PRECLEARED_API_KEY", "").strip(),
         gemini_api_key=(os.getenv("GEMINI_API_KEY", "").strip() or os.getenv("GOOGLE_API_KEY", "").strip()),
         groq_api_key=os.getenv("GROQ_API_KEY", "").strip(),

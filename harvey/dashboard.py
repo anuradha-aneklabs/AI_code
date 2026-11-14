@@ -4807,7 +4807,7 @@ async def test_integration_connection(request: Request):
 
     elif provider in ("calcom", "calendly", "dataforseo", "serper", "tinyfish", "scavio", "zerobounce", "hunter", "reoon"):
         env_map = {
-            "calcom": ["CALCOM_API_KEY", "CAL_COM_API_KEY"],
+            "calcom": ["CALCOM_API_KEY", "CAL_COM_API_KEY", "CAL_API_KEY"],
             "calendly": ["CALENDLY_TOKEN", "CALENDLY_API_KEY"],
             "dataforseo": ["DATAFORSEO_LOGIN", "DATAFORSEO_PASSWORD"],
             "serper": ["SERPER_API_KEY"],
