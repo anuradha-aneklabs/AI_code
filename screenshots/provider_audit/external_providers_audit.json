@@ -1,0 +1,182 @@
+{
+  "DataForSEO": {
+    "category": "Lead Discovery & SERP",
+    "env_vars": [
+      "DATAFORSEO_LOGIN",
+      "DATAFORSEO_PASSWORD"
+    ],
+    "configured": false,
+    "module": "harvey.collectors.discover.DataForSEOListings",
+    "endpoints": [
+      "https://api.dataforseo.com/v3/serp/google/maps/live/advanced",
+      "https://api.dataforseo.com/v3/serp/google/organic/live/regular"
+    ],
+    "auth_method": "HTTP Basic Auth (Base64 login:password)",
+    "readiness": "CREDENTIAL BLOCKED",
+    "safety_controls": "Free-balance query checks, rate limit retries (429, 500, 502)",
+    "notes": "Code complete. Awaiting operator API credentials."
+  },
+  "Serper": {
+    "category": "Lead Discovery & Google Maps",
+    "env_vars": [
+      "SERPER_API_KEY"
+    ],
+    "configured": false,
+    "module": "harvey.collectors.discover.Serper",
+    "endpoints": [
+      "https://google.serper.dev/search",
+      "https://google.serper.dev/places"
+    ],
+    "auth_method": "Header 'X-API-KEY'",
+    "readiness": "CREDENTIAL BLOCKED",
+    "safety_controls": "Strict schema validation, HTTP error status handling",
+    "notes": "Code complete. Awaiting Serper API key."
+  },
+  "TinyFish": {
+    "category": "Web Scraping & Contact Extraction",
+    "env_vars": [
+      "TINYFISH_API_KEY"
+    ],
+    "module": "harvey.collectors.discover.TinyFish",
+    "configured": false,
+    "endpoints": [
+      "https://api.search.tinyfish.ai"
+    ],
+    "auth_method": "Header 'Authorization: Bearer <key>'",
+    "readiness": "CREDENTIAL BLOCKED",
+    "safety_controls": "HTML sanitization, pacing (30/min, 490/hr cap)",
+    "notes": "Code complete. Awaiting TinyFish API key."
+  },
+  "Scavio": {
+    "category": "Lead Discovery & B2B Listings",
+    "env_vars": [
+      "SCAVIO_API_KEY"
+    ],
+    "configured": false,
+    "module": "harvey.collectors.discover.ScavioProvider",
+    "endpoints": [
+      "https://api.scavio.dev/api/v2/google"
+    ],
+    "auth_method": "Header 'Authorization: Bearer <key>'",
+    "readiness": "CREDENTIAL BLOCKED",
+    "safety_controls": "Strict record schema enforcement, credit pacing",
+    "notes": "Code complete. Awaiting Scavio API key."
+  },
+  "Hunter.io": {
+    "category": "Email Pattern & Verification",
+    "env_vars": [
+      "HUNTER_API_KEY",
+      "HUNTER_MONTHLY_SEARCHES"
+    ],
+    "configured": false,
+    "module": "harvey.integrations.email_finder",
+    "endpoints": [
+      "https://api.hunter.io/v2/domain-search",
+      "https://api.hunter.io/v2/email-verifier"
+    ],
+    "auth_method": "Query param 'api_key=<key>'",
+    "readiness": "CREDENTIAL BLOCKED",
+    "safety_controls": "Monthly quota enforcement (25 free searches/month), transient error backoff",
+    "notes": "Code complete. Awaiting Hunter.io API key."
+  },
+  "ZeroBounce": {
+    "category": "Email Deliverability Verification",
+    "env_vars": [
+      "ZEROBOUNCE_API_KEY"
+    ],
+    "configured": false,
+    "module": "harvey.integrations.email_finder.verify_zerobounce",
+    "endpoints": [
+      "https://api.zerobounce.net/v2/validate"
+    ],
+    "auth_method": "Query param 'api_key=<key>'",
+    "readiness": "CREDENTIAL BLOCKED",
+    "safety_controls": "Catch-all disambiguation, spam-trap protection, sub-status mapping",
+    "notes": "Code complete. Awaiting ZeroBounce API key."
+  },
+  "Reoon": {
+    "category": "Email Verification & Disposable Detection",
+    "env_vars": [
+      "REOON_API_KEY"
+    ],
+    "configured": false,
+    "module": "harvey.integrations.email_finder.verify_reoon",
+    "endpoints": [
+      "https://emailverifier.reoon.com/api/v1/verify"
+    ],
+    "auth_method": "Query param 'key=<key>'",
+    "readiness": "CREDENTIAL BLOCKED",
+    "safety_controls": "Power-mode validation, disposable mailbox filtering",
+    "notes": "Code complete. Awaiting Reoon API key."
+  },
+  "Cal.com": {
+    "category": "Meeting Scheduling",
+    "env_vars": [
+      "CALCOM_API_KEY",
+      "CAL_COM_API_KEY"
+    ],
+    "configured": false,
+    "module": "harvey.integrations.calendar.CalendarClient",
+    "endpoints": [
+      "https://api.cal.com/v1/event-types",
+      "https://api.cal.com/v1/bookings"
+    ],
+    "auth_method": "Query param 'apiKey=<key>'",
+    "readiness": "CREDENTIAL BLOCKED (LOCAL ICS FALLBACK ACTIVE)",
+    "safety_controls": "Local RFC 5545 .ics invite generation fallback when API key is unset",
+    "notes": "Code complete. Operating in local .ics calendar fallback mode."
+  },
+  "Calendly": {
+    "category": "Meeting Scheduling",
+    "env_vars": [
+      "CALENDLY_TOKEN",
+      "CALENDLY_API_KEY"
+    ],
+    "configured": false,
+    "module": "harvey.integrations.calendar.CalendarClient",
+    "endpoints": [
+      "https://api.calendly.com/users/me",
+      "https://api.calendly.com/event_types"
+    ],
+    "auth_method": "Header 'Authorization: Bearer <token>'",
+    "readiness": "CREDENTIAL BLOCKED (LOCAL ICS FALLBACK ACTIVE)",
+    "safety_controls": "Local RFC 5545 .ics invite generation fallback when token is unset",
+    "notes": "Code complete. Operating in local .ics calendar fallback mode."
+  },
+  "Microsoft 365": {
+    "category": "Email & Calendar Inbox Monitoring",
+    "env_vars": [
+      "AZURE_CLIENT_ID",
+      "AZURE_CLIENT_SECRET",
+      "AZURE_TENANT_ID"
+    ],
+    "configured": false,
+    "module": "harvey.integrations.microsoft.MicrosoftProvider",
+    "endpoints": [
+      "https://login.microsoftonline.com/{tenant}/oauth2/v2.0/token",
+      "https://graph.microsoft.com/v1.0/me/messages"
+    ],
+    "auth_method": "OAuth2 Client Credentials / Authorization Code with MSAL",
+    "readiness": "CREDENTIAL BLOCKED",
+    "safety_controls": "Strictly READ-ONLY (Mail.Read, Calendars.Read). No Mail.Send scope requested.",
+    "notes": "Code complete. Awaiting Azure AD application registration credentials."
+  },
+  "Gmail": {
+    "category": "Email Inbox Monitoring & Reply Detection",
+    "env_vars": [
+      "GMAIL_CLIENT_ID",
+      "GMAIL_CLIENT_SECRET"
+    ],
+    "configured": true,
+    "has_live_token": false,
+    "module": "harvey.integrations.gmail.GmailProvider",
+    "endpoints": [
+      "https://accounts.google.com/o/oauth2/token",
+      "https://gmail.googleapis.com/gmail/v1/users/me/messages"
+    ],
+    "auth_method": "OAuth2 Refresh Token (Google APIs)",
+    "readiness": "OAUTH CONSENT REQUIRED (Client Keys Configured)",
+    "safety_controls": "Strictly READ-ONLY (https://www.googleapis.com/auth/gmail.readonly). Live sending disabled.",
+    "notes": "GMAIL_CLIENT_ID and GMAIL_CLIENT_SECRET configured in .env. Operator interactive OAuth consent required for live token."
+  }
+}

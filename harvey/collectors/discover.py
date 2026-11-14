@@ -1192,13 +1192,13 @@ class OpenStreetMap(DiscoveryProvider):
                         for item in nom_items:
                             disp_name = item.get("display_name") or ""
                             first_part = disp_name.split(",")[0].strip()
-                            raw_name = item.get("name") or first_part or "Dental Practice"
+                            raw_name = item.get("name") or first_part or f"{query.term.title()} Provider"
                             osm_type = item.get("osm_type", "node")
                             osm_id = item.get("osm_id", "")
                             addr_dict = item.get("address") or {}
                             city = addr_dict.get("city") or addr_dict.get("town") or addr_dict.get("county") or query.location
-                            state_name = addr_dict.get("state") or "Madhya Pradesh"
-                            full_loc = f"{city}, {state_name}"
+                            state_name = addr_dict.get("state") or ""
+                            full_loc = f"{city}, {state_name}".strip(", ") if state_name else city
                             out.append(Business(
                                 name=raw_name,
                                 domain="",
@@ -1206,7 +1206,7 @@ class OpenStreetMap(DiscoveryProvider):
                                 phone="",
                                 address=disp_name,
                                 location=full_loc,
-                                category="amenity=dentist",
+                                category=query.term or "business",
                                 has_website=False,
                                 external_id=f"osm:{osm_type}/{osm_id}",
                                 source_url=f"https://www.openstreetmap.org/{osm_type}/{osm_id}",

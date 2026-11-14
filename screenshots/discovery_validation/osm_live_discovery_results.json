@@ -1,0 +1,398 @@
+{
+  "timestamp": "2026-11-14T14:14:10Z",
+  "geocoding": {
+    "Austin, TX": {
+      "coord": "30.2649,-97.7474,30",
+      "latency": 1.181
+    },
+    "Denver, CO": {
+      "coord": "39.7392,-104.9849,30",
+      "latency": 0.588
+    },
+    "Chicago, IL": {
+      "coord": "41.8756,-87.6244,30",
+      "latency": 0.686
+    }
+  },
+  "discovery": [
+    {
+      "term": "dentist",
+      "location": "Austin, TX",
+      "latency_s": 39.752,
+      "count": 9,
+      "businesses": [
+        {
+          "name": "Smiles by Dentistry",
+          "address": "130 Brodie Lane",
+          "location": "Austin, TX",
+          "phone": "",
+          "domain": "",
+          "website": "",
+          "external_id": "osm:node/564536984",
+          "provider": "osm",
+          "provenance": "LIVE VERIFIED",
+          "is_sample": false
+        },
+        {
+          "name": "Omni Dental Group",
+          "address": "",
+          "location": "Austin, TX",
+          "phone": "",
+          "domain": "",
+          "website": "",
+          "external_id": "osm:node/863465762",
+          "provider": "osm",
+          "provenance": "LIVE VERIFIED",
+          "is_sample": false
+        },
+        {
+          "name": "Austin Dental Works",
+          "address": "",
+          "location": "Austin, TX",
+          "phone": "",
+          "domain": "",
+          "website": "",
+          "external_id": "osm:node/1236793096",
+          "provider": "osm",
+          "provenance": "LIVE VERIFIED",
+          "is_sample": false
+        },
+        {
+          "name": "Castle Dental",
+          "address": "",
+          "location": "Austin, TX",
+          "phone": "",
+          "domain": "",
+          "website": "",
+          "external_id": "osm:node/1249567757",
+          "provider": "osm",
+          "provenance": "LIVE VERIFIED",
+          "is_sample": false
+        },
+        {
+          "name": "Hammons Family Dental",
+          "address": "",
+          "location": "Austin, TX",
+          "phone": "",
+          "domain": "",
+          "website": "",
+          "external_id": "osm:node/1249567769",
+          "provider": "osm",
+          "provenance": "LIVE VERIFIED",
+          "is_sample": false
+        },
+        {
+          "name": "Fastbraces",
+          "address": "",
+          "location": "Austin, TX",
+          "phone": "",
+          "domain": "",
+          "website": "",
+          "external_id": "osm:node/1249568535",
+          "provider": "osm",
+          "provenance": "LIVE VERIFIED",
+          "is_sample": false
+        },
+        {
+          "name": "Lone Star Pediatric Dental",
+          "address": "",
+          "location": "Austin, TX",
+          "phone": "",
+          "domain": "",
+          "website": "",
+          "external_id": "osm:node/2527535401",
+          "provider": "osm",
+          "provenance": "LIVE VERIFIED",
+          "is_sample": false
+        },
+        {
+          "name": "KC Dental",
+          "address": "6301 West Parmer Lane",
+          "location": "Austin, TX",
+          "phone": "+1-512-918-0888",
+          "domain": "kcdentalaustin.com",
+          "website": "https://www.kcdentalaustin.com/",
+          "external_id": "osm:node/2533220906",
+          "provider": "osm",
+          "provenance": "LIVE VERIFIED",
+          "is_sample": false
+        },
+        {
+          "name": "Tech Ridge Dental",
+          "address": "12400 North Interstate 35",
+          "location": "Austin, TX",
+          "phone": "+1-512-821-2394",
+          "domain": "techridgedental.com",
+          "website": "https://www.techridgedental.com/",
+          "external_id": "osm:node/2663954886",
+          "provider": "osm",
+          "provenance": "LIVE VERIFIED",
+          "is_sample": false
+        }
+      ],
+      "status": "PASS"
+    },
+    {
+      "term": "plumber",
+      "location": "Denver, CO",
+      "latency_s": 27.477,
+      "count": 10,
+      "businesses": [
+        {
+          "name": "Heating & Plumbing Engineers",
+          "address": "715 Vallejo Street",
+          "location": "Denver, CO",
+          "phone": "",
+          "domain": "",
+          "website": "",
+          "external_id": "osm:node/3527183747",
+          "provider": "osm",
+          "provenance": "LIVE VERIFIED",
+          "is_sample": false
+        },
+        {
+          "name": "Applewood Plumbing Heating & Electric",
+          "address": "5000 West 29th Avenue",
+          "location": "Denver, CO",
+          "phone": "",
+          "domain": "",
+          "website": "",
+          "external_id": "osm:node/3924121965",
+          "provider": "osm",
+          "provenance": "LIVE VERIFIED",
+          "is_sample": false
+        },
+        {
+          "name": "Payless Plumbing",
+          "address": "6927 West 83rd Way",
+          "location": "Arvada, CO",
+          "phone": "+1-303-927-6247",
+          "domain": "paylessplumbing.org",
+          "website": "https://www.paylessplumbing.org/",
+          "external_id": "osm:node/4045722720",
+          "provider": "osm",
+          "provenance": "LIVE VERIFIED",
+          "is_sample": false
+        },
+        {
+          "name": "Time Plumbing Heating and Electric",
+          "address": "2525 West 6th Avenue",
+          "location": "Denver, CO",
+          "phone": "",
+          "domain": "",
+          "website": "",
+          "external_id": "osm:node/4253078718",
+          "provider": "osm",
+          "provenance": "LIVE VERIFIED",
+          "is_sample": false
+        },
+        {
+          "name": "Good Plumbing Service Company",
+          "address": "5401 West 48th Avenue",
+          "location": "Denver, CO",
+          "phone": "",
+          "domain": "",
+          "website": "",
+          "external_id": "osm:node/4583983233",
+          "provider": "osm",
+          "provenance": "LIVE VERIFIED",
+          "is_sample": false
+        },
+        {
+          "name": "Progressive Plumbing and Heating, Inc.",
+          "address": "250 East Dry Creek Road",
+          "location": "Littleton, CO",
+          "phone": "+1-303-495-6400",
+          "domain": "",
+          "website": "",
+          "external_id": "osm:node/6225923094",
+          "provider": "osm",
+          "provenance": "LIVE VERIFIED",
+          "is_sample": false
+        },
+        {
+          "name": "Fix-it 24/7 Plumbing, Heating, Air & Electric",
+          "address": "16360 Table Mountain Parkway",
+          "location": "Golden, CO",
+          "phone": "+1-720-928-9317",
+          "domain": "fixmyhome.com",
+          "website": "https://www.fixmyhome.com",
+          "external_id": "osm:node/9658785755",
+          "provider": "osm",
+          "provenance": "LIVE VERIFIED",
+          "is_sample": false
+        },
+        {
+          "name": "Master Rooter",
+          "address": "290 Vallejo Street",
+          "location": "Denver, CO",
+          "phone": "+1-720-434-3406",
+          "domain": "masterrooter.plumbing",
+          "website": "https://masterrooter.plumbing/",
+          "external_id": "osm:node/9760648076",
+          "provider": "osm",
+          "provenance": "LIVE VERIFIED",
+          "is_sample": false
+        },
+        {
+          "name": "Anywhere Rooter",
+          "address": "2290 Chambers Road",
+          "location": "Aurora, CO",
+          "phone": "+1-303-865-4830",
+          "domain": "anywhererooter.com",
+          "website": "https://www.anywhererooter.com",
+          "external_id": "osm:node/9776172053",
+          "provider": "osm",
+          "provenance": "LIVE VERIFIED",
+          "is_sample": false
+        },
+        {
+          "name": "Jake The Snake Drain Cleaning",
+          "address": "7755 East Quincy Avenue",
+          "location": "Denver, CO",
+          "phone": "+1-303-905-8047",
+          "domain": "jakethesnakedraincleaning.com",
+          "website": "https://jakethesnakedraincleaning.com",
+          "external_id": "osm:node/9817205924",
+          "provider": "osm",
+          "provenance": "LIVE VERIFIED",
+          "is_sample": false
+        }
+      ],
+      "status": "PASS"
+    },
+    {
+      "term": "lawyer",
+      "location": "Chicago, IL",
+      "latency_s": 37.775,
+      "count": 10,
+      "businesses": [
+        {
+          "name": "Malman Law Chicago",
+          "address": "205 West Randolph Street",
+          "location": "Chicago, IL",
+          "phone": "+1-312-629-0099",
+          "domain": "malmanlaw.com",
+          "website": "https://www.malmanlaw.com/",
+          "external_id": "osm:node/2554466602",
+          "provider": "osm",
+          "provenance": "LIVE VERIFIED",
+          "is_sample": false
+        },
+        {
+          "name": "The White Law Group, LLC",
+          "address": "205 West Randolph Street",
+          "location": "Chicago",
+          "phone": "+1-312-238-9650",
+          "domain": "whitesecuritieslaw.com",
+          "website": "https://www.whitesecuritieslaw.com/",
+          "external_id": "osm:node/2622842623",
+          "provider": "osm",
+          "provenance": "LIVE VERIFIED",
+          "is_sample": false
+        },
+        {
+          "name": "Law Office of Andrew J. Harger",
+          "address": "300 North LaSalle Boulevard",
+          "location": "Chicago, IL",
+          "phone": "+1-312-803-0388",
+          "domain": "hargerlawfirm.com",
+          "website": "https://www.hargerlawfirm.com/",
+          "external_id": "osm:node/3026278564",
+          "provider": "osm",
+          "provenance": "LIVE VERIFIED",
+          "is_sample": false
+        },
+        {
+          "name": "Law Offices of Jonhathan M Aven, LTD",
+          "address": "180 North Michigan Avenue",
+          "location": "Chicago, IL",
+          "phone": "+1-312-251-8777",
+          "domain": "avenlaw.com",
+          "website": "https://www.avenlaw.com/",
+          "external_id": "osm:node/3372776774",
+          "provider": "osm",
+          "provenance": "LIVE VERIFIED",
+          "is_sample": false
+        },
+        {
+          "name": "Nenye E. Uche, Attorney at Law",
+          "address": "201 East Ohio Street",
+          "location": "Chicago, IL",
+          "phone": "+1 312-380-5341",
+          "domain": "criminaldefenseattorneyinchicago.com",
+          "website": "https://criminaldefenseattorneyinchicago.com/",
+          "external_id": "osm:node/3400023429",
+          "provider": "osm",
+          "provenance": "LIVE VERIFIED",
+          "is_sample": false
+        },
+        {
+          "name": "Martinez & Betancourt",
+          "address": "2455 North Milwaukee Avenue",
+          "location": "Chicago, IL",
+          "phone": "",
+          "domain": "",
+          "website": "",
+          "external_id": "osm:node/3659113891",
+          "provider": "osm",
+          "provenance": "LIVE VERIFIED",
+          "is_sample": false
+        },
+        {
+          "name": "Correa Law",
+          "address": "3010 West Diversey Avenue",
+          "location": "Chicago, IL",
+          "phone": "",
+          "domain": "",
+          "website": "",
+          "external_id": "osm:node/3819140675",
+          "provider": "osm",
+          "provenance": "LIVE VERIFIED",
+          "is_sample": false
+        },
+        {
+          "name": "Logan Square Law Offices, PC",
+          "address": "",
+          "location": "Chicago, IL",
+          "phone": "",
+          "domain": "",
+          "website": "",
+          "external_id": "osm:node/3847808328",
+          "provider": "osm",
+          "provenance": "LIVE VERIFIED",
+          "is_sample": false
+        },
+        {
+          "name": "Loukas Law",
+          "address": "",
+          "location": "Chicago, IL",
+          "phone": "",
+          "domain": "",
+          "website": "",
+          "external_id": "osm:node/4087337678",
+          "provider": "osm",
+          "provenance": "LIVE VERIFIED",
+          "is_sample": false
+        },
+        {
+          "name": "Warren C. Dulski Attorney at Law",
+          "address": "4108 North Cicero Avenue",
+          "location": "Chicago, IL",
+          "phone": "",
+          "domain": "",
+          "website": "",
+          "external_id": "osm:node/4098148790",
+          "provider": "osm",
+          "provenance": "LIVE VERIFIED",
+          "is_sample": false
+        }
+      ],
+      "status": "PASS"
+    }
+  ],
+  "database_provenance": {
+    "live_leads": 5,
+    "sample_leads": 93
+  }
+}

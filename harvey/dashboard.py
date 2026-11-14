@@ -2426,6 +2426,7 @@ async def get_discovery_criteria():
                 "Marketing and Consulting Agencies",
                 "Professional and Business Services",
                 "CleanTech / Renewable Energy",
+                "Healthcare / Dental",
             ],
             "company_sizes": [
                 "1-10 employees",
