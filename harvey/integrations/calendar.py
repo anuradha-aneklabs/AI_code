@@ -466,12 +466,11 @@ class CalendarClient:
                     },
                 )
 
-                # Look up prospect and advance pipeline stage to 'Meeting Booked'
-                prospects = await state.get_prospects()
-                matching = [p for p in prospects if getattr(p, "email", "").lower() == prospect_email.lower()]
-                for p in matching:
-                    await state.update_prospect_pipeline_stage(p.id, "Meeting Booked", notes=f"Meeting confirmed for {slot.get('formatted', slot_start)}")
-                    logger.info(f"Advanced prospect {p.id} to 'Meeting Booked'")
+                # Look up prospect and advance pipeline stage to 'Meeting'
+                prospect = await state.get_prospect_by_email(prospect_email)
+                if prospect:
+                    await state.update_prospect_pipeline(prospect.id, stage="Meeting", notes=f"Meeting confirmed for {slot.get('formatted', slot_start)}")
+                    logger.info(f"Advanced prospect {prospect.id} to 'Meeting'")
             except Exception as e:
                 logger.warning(f"Error persisting booked meeting state: {e}")
 

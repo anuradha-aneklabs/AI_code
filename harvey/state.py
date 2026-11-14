@@ -1127,6 +1127,16 @@ class StateManager:
                 rows = await cursor.fetchall()
                 return [self._prospect_from_row(r) for r in rows]
 
+    async def get_prospects(self, limit: int = 1000) -> list[Prospect]:
+        async with self._connect() as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(
+                "SELECT * FROM prospects ORDER BY created_at DESC LIMIT ?",
+                (limit,),
+            ) as cursor:
+                rows = await cursor.fetchall()
+                return [self._prospect_from_row(r) for r in rows]
+
     async def set_prospect_timezone(self, prospect_id: str, zone: str):
         """Remember a recipient's time zone. Leaves updated_at alone: it
         isn't a change anyone made to the prospect."""
@@ -3631,6 +3641,21 @@ class StateManager:
         })
 
         return prospect.model_dump() if hasattr(prospect, "model_dump") else prospect.dict()
+
+    async def update_prospect_pipeline_stage(
+        self, prospect_id: str, stage: str, notes: str | None = None
+    ) -> dict:
+        """Alias for update_prospect_pipeline, mapping common labels like 'Meeting Booked' to 'Meeting'."""
+        target = "Meeting" if stage == "Meeting Booked" else stage
+        return await self.update_prospect_pipeline(prospect_id, stage=target, notes=notes)
+
+    async def get_sent_count(self) -> int:
+        """Alias for count_outbox_sent."""
+        return await self.count_outbox_sent()
+
+    async def approve_outbox_item(self, item_id: str | None = None) -> int:
+        """Alias for approve_outbox."""
+        return await self.approve_outbox(item_id)
 
     async def get_pipeline_leads(
         self,
