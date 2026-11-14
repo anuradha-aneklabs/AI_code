@@ -128,3 +128,4 @@ SELECT request_summary, error_snippet FROM provider_logs WHERE request_summary L
 ## 9. Conclusion
 
 The Harvey AI Sales Agent satisfies all regulatory, safety, and architectural constraints. The system is certified safe for operation under pilot review parameters.
+

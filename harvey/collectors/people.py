@@ -20,6 +20,7 @@ Each person comes back as a dict:
 import html as html_lib
 import json
 import re
+from functools import lru_cache
 from urllib.parse import unquote, urljoin, urlparse
 
 from harvey.collectors.profile import (
@@ -295,13 +296,28 @@ MAX_QUOTE_CHARS = 8000
 
 MAX_QUOTES = 200
 
+_TAG_PATTERNS: dict[str, re.Pattern] = {}
+
+def _tag_pattern(tag: str) -> re.Pattern:
+    tag_lower = tag.lower()
+    p = _TAG_PATTERNS.get(tag_lower)
+    if p is None:
+        p = re.compile(rf"(?i)<(/?){re.escape(tag_lower)}\b[^>]*?(/?)>")
+        _TAG_PATTERNS[tag_lower] = p
+    return p
+
 
 def _close_of(html: str, start: int, tag: str) -> int:
     """Index just past the element opened at ``start`` (same-tag depth
     count), looking no further than MAX_QUOTE_CHARS ahead; ``start`` when it
     doesn't close within that window."""
-    depth, pos = 0, start
-    pattern = re.compile(rf"(?i)<(/?){re.escape(tag)}\b[^>]*?(/?)>")
+    tag_lower = tag.lower()
+    window = html[start:min(len(html), start + MAX_QUOTE_CHARS)]
+    if f"</{tag_lower}" not in window.lower():
+        return start
+
+    depth = 0
+    pattern = _tag_pattern(tag_lower)
     for m in pattern.finditer(html, start, min(len(html), start + MAX_QUOTE_CHARS)):
         if m.group(2):          # self-closing
             continue
@@ -311,6 +327,7 @@ def _close_of(html: str, start: int, tag: str) -> int:
     return start
 
 
+@lru_cache(maxsize=128)
 def drop_quoted(html: str) -> str:
     """Remove testimonials, reviews and embedded tweets: the people quoted
     there are customers ("Paula Grey, Product designer and founder"), never

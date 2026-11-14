@@ -143,3 +143,4 @@ ORDER BY created_at DESC LIMIT 5;
 - Real pings and queries are recorded with microsecond timestamps.
 - Zero secret credentials or API tokens are leaked into the database logs.
 - The system achieves 100% architectural transparency.
+

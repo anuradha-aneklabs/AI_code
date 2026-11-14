@@ -4742,8 +4742,8 @@ async def test_integration_connection(request: Request):
 
     elif provider == "chromadb":
         try:
-            from harvey.rag.store import ChromaStore
-            store = ChromaStore()
+            from harvey.rag.store import VectorStore
+            store = VectorStore()
             count = store.count()
             latency_ms = int((time.time() - start_time) * 1000)
             success = True

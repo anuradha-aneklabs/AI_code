@@ -83,6 +83,8 @@ function escHtml(s) {
   ));
 
 }
+const escapeHtml = escHtml;
+
 
 
 
@@ -2711,21 +2713,21 @@ async function loadIntegrationMatrix() {
         <div style="border:1px solid var(--border);border-radius:8px;padding:14px;background:var(--bg-card);display:flex;flex-direction:column;justify-content:space-between;gap:10px;">
           <div>
             <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:8px;">
-              <div style="font-weight:600;font-size:14px;">${escapeHtml(item.display_name)} ${isFreeBadge}</div>
-              <span style="font-size:11px;padding:2px 8px;border-radius:12px;font-weight:500;white-space:nowrap;${bStyle}">${escapeHtml(item.status_label)}</span>
+              <div style="font-weight:600;font-size:14px;">${escHtml(item.display_name)} ${isFreeBadge}</div>
+              <span style="font-size:11px;padding:2px 8px;border-radius:12px;font-weight:500;white-space:nowrap;${bStyle}">${escHtml(item.status_label)}</span>
             </div>
-            <div style="font-size:11px;color:var(--text-muted);margin-top:4px;text-transform:uppercase;letter-spacing:0.5px;">Type: ${escapeHtml(item.type)}</div>
+            <div style="font-size:11px;color:var(--text-muted);margin-top:4px;text-transform:uppercase;letter-spacing:0.5px;">Type: ${escHtml(item.type)}</div>
             ${missingHtml}
           </div>
           <div style="display:flex;justify-content:space-between;align-items:center;padding-top:8px;border-top:1px solid var(--border);font-size:11px;color:var(--text-muted);">
-            <div>${usageText}${costText} &middot; <span title="${escapeHtml(item.last_tested_at || '')}">${testedText}</span></div>
-            <button class="btn btn-secondary btn-sm" style="padding:2px 8px;font-size:11px;" onclick="testIntegration('${escapeHtml(item.provider)}')">Test</button>
+            <div>${usageText}${costText} &middot; <span title="${escHtml(item.last_tested_at || '')}">${testedText}</span></div>
+            <button class="btn btn-secondary btn-sm" style="padding:2px 8px;font-size:11px;" onclick="testIntegration('${escHtml(item.provider)}')">Test</button>
           </div>
         </div>
       `;
     }).join('');
   } catch (err) {
-    container.innerHTML = `<div style="padding:16px;color:#ef4444;">Error loading integration status: ${escapeHtml(err.message)}</div>`;
+    container.innerHTML = `<div style="padding:16px;color:#ef4444;">Error loading integration status: ${escHtml(err.message)}</div>`;
   }
 }
 

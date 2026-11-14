@@ -161,3 +161,4 @@ Harvey includes a built-in connection verification utility. In the Dashboard (`h
 2. Locate the provider card (e.g., OpenStreetMap, Microsoft 365, ZeroBounce).
 3. Click the **Test Connection** button on the card.
 4. The system executes a live test, updates the card status badge (`Connected` or `Disconnected`), and logs the request to the `provider_logs` audit table.
+

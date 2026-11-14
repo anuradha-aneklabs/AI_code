@@ -99,3 +99,4 @@ All 7 required project reports have been authored and placed in the project root
 2. **Local AI Model Recommendation:** Continue utilizing Ollama with `qwen2.5:1.5b` for cost-effective, zero-latency, private on-device generation.
 3. **Database Maintenance:** Use automated WAL checkpointing and retain daily SQLite backups (`data/harvey_backup_*.db`).
 4. **Approval Workflow:** Operators should approve drafts individually via the dashboard Outbox tab after reviewing the grounded value proposition.
+

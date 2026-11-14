@@ -54,12 +54,39 @@ class VectorStore:
         vectors = await self.embeddings.embed_documents(texts)
         has_vectors = bool(vectors and any(v for v in vectors))
 
+        # Check expected collection dimension if collection already has embeddings
+        expected_dim = None
+        if self.collection.count() > 0:
+            try:
+                sample = self.collection.get(include=["embeddings"], limit=1)
+                if sample.get("embeddings") is not None and len(sample["embeddings"]) > 0:
+                    expected_dim = len(sample["embeddings"][0])
+            except Exception:
+                pass
+
         if has_vectors:
             self.collection.upsert(
                 ids=ids,
                 documents=texts,
                 metadatas=metadatas,
                 embeddings=vectors,
+            )
+        elif expected_dim:
+            # Deterministic hash embeddings matching collection dimension when AI embedder is offline
+            import hashlib, math
+            def _text_to_vec(t: str, dim: int) -> list[float]:
+                v = [0.0] * dim
+                for w in t.lower().split():
+                    h = int(hashlib.md5(w.encode("utf-8")).hexdigest(), 16)
+                    v[h % dim] += 1.0
+                norm = math.sqrt(sum(x * x for x in v)) or 1.0
+                return [x / norm for x in v]
+            fallback_vectors = [_text_to_vec(t, expected_dim) for t in texts]
+            self.collection.upsert(
+                ids=ids,
+                documents=texts,
+                metadatas=metadatas,
+                embeddings=fallback_vectors,
             )
         else:
             # Upsert without embeddings (Chroma uses default or text-only)
@@ -86,6 +113,7 @@ class VectorStore:
         where_filter = {"source": source_filter} if source_filter else None
         query_vector = await self.embeddings.embed_query(query)
 
+        results = None
         try:
             if query_vector:
                 results = self.collection.query(
@@ -100,13 +128,45 @@ class VectorStore:
                     where=where_filter,
                 )
         except Exception as e:
-            logger.warning(f"ChromaDB search query failed: {e}")
+            logger.warning(f"ChromaDB search query failed: {e}; attempting lexical fallback search...")
+
+        # If ChromaDB query failed (e.g. dimension mismatch when embedder is offline), perform lexical ranking
+        if not results or not results.get("ids") or not results["ids"][0]:
+            try:
+                import re
+                all_data = self.collection.get(include=["documents", "metadatas"], where=where_filter)
+                if all_data and all_data.get("ids"):
+                    q_lower = query.lower()
+                    q_words = set(re.findall(r"\w+", q_lower))
+                    scored_docs = []
+                    for doc_id, meta, doc in zip(all_data["ids"], all_data["metadatas"], all_data["documents"]):
+                        doc_lower = doc.lower()
+                        doc_words = set(re.findall(r"\w+", doc_lower))
+                        src_words = set(re.findall(r"\w+", meta.get("source", "").lower()))
+                        overlap = len(q_words & doc_words) + 2 * len(q_words & src_words)
+                        if q_lower in doc_lower:
+                            overlap += 5  # Exact phrase bonus
+                        if overlap > 0:
+                            scored_docs.append((overlap, doc_id, doc, meta))
+                    scored_docs.sort(key=lambda x: x[0], reverse=True)
+                    if scored_docs:
+                        return [
+                            {
+                                "chunk_id": d[1],
+                                "text": d[2],
+                                "source": d[3].get("source", "unknown"),
+                                "page": d[3].get("page", 1),
+                                "chunk_index": d[3].get("chunk_index", 1),
+                                "file_type": d[3].get("file_type", "txt"),
+                                "score": round(min(1.0, 0.5 + 0.1 * d[0]), 4),
+                            }
+                            for d in scored_docs[:top_k]
+                        ]
+            except Exception as lex_err:
+                logger.warning(f"Lexical fallback search error: {lex_err}")
             return []
 
         chunks_out: list[dict[str, Any]] = []
-        if not results or not results.get("ids") or not results["ids"][0]:
-            return []
-
         ids = results["ids"][0]
         docs = results.get("documents", [[]])[0]
         metas = results.get("metadatas", [[]])[0]
