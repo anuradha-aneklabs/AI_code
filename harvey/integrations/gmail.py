@@ -275,8 +275,19 @@ class GmailProvider(MailProvider):
                 return SendResult(ok=False, error=f"Safety block: {to_email} is not in the approved test-recipient allowlist.")
         msg = EmailMessage()
         persona = self.config.persona
+        auth_email = getattr(self, "_authenticated_email", "")
+        if not auth_email:
+            try:
+                prof = await self._request("GET", "/profile")
+                if prof and prof.get("emailAddress"):
+                    auth_email = prof["emailAddress"]
+                    self._authenticated_email = auth_email
+            except Exception:
+                pass
+        sender_email = auth_email or persona.email
+        sender_name = persona.name or "Harvey AI Sales Agent"
         msg["To"] = to_email
-        msg["From"] = f"{persona.name} <{persona.email}>" if persona.email else persona.name
+        msg["From"] = f"{sender_name} <{sender_email}>" if sender_email else sender_name
         msg["Subject"] = subject
         if in_reply_to:
             msg["In-Reply-To"] = in_reply_to

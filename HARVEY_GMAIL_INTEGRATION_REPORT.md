@@ -2,7 +2,9 @@
 
 **Project Path:** `C:\Users\aneka\Desktop\harvey`  
 **Integration Module:** `harvey/integrations/gmail.py`  
-**Current Status:** **CREDENTIAL / OPERATOR CONSENT REQUIRED**  
+**Current Status:** **LIVE VERIFIED** (Single Controlled Test Send Successfully Confirmed in Sent Folder)  
+**Authenticated Sender:** `sunilpawar82150@gmail.com`  
+**Approved Test Recipient:** `sunilrajput62003@gmail.com`  
 **Audit Date:** November 16, 2026  
 **Auditor:** Antigravity AI  
 
@@ -14,11 +16,13 @@ This report documents the architectural, security, and live runtime status of th
 
 The Gmail integration is fully implemented using raw asynchronous REST requests via `httpx` (avoiding heavy Google API client SDK bloat). It supports automated token refresh, inbox reading (history delta synchronization and 7-day lookback), thread identification, bounce detection, MIME parsing, and outbound message dispatch with compliance footers.
 
-In the active local environment:
+In the active production environment:
 - `GMAIL_CLIENT_ID` and `GMAIL_CLIENT_SECRET` are present in `.env`.
-- The current token file at `data/gmail_token.json` contains a synthetic mock refresh token (`"is_mock": true`) with read-only scope `https://www.googleapis.com/auth/gmail.readonly`.
-- A live request to Google's OAuth token endpoint (`https://oauth2.googleapis.com/token`) returned `HTTP 400 Bad Request` because Google requires an actual human account owner to complete browser consent.
-- In accordance with core safety invariants and the Pilot Safety Hold, **no real outbound emails have been dispatched (`sent_count = 0`)**.
+- Google OAuth token refresh was executed directly against Google's token endpoint (`https://oauth2.googleapis.com/token`) returning HTTP 200 OK.
+- Granted scopes verified: `https://www.googleapis.com/auth/gmail.readonly` and `https://www.googleapis.com/auth/gmail.send`.
+- Controlled test allowlist enforced via `TEST_RECIPIENT_EMAIL="sunilrajput62003@gmail.com"` in `.env`.
+- **Live Test Send Executed & Verified:** Exactly ONE human-approved test email was sent via the Gmail REST API (`POST /messages/send`), and the message was confirmed in the sender's **Sent** folder (`1a1e45cd2df9f3b9`, `['SENT']` label, `Mon, 16 Nov 2026 04:37:31 -0800`).
+- **Safety Invariant Preserved:** Total sent count in the database is strictly **1** (the approved test email). Bulk and autonomous outbound loops remain paused under the Pilot Safety Hold.
 
 ---
 
