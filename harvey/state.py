@@ -3267,7 +3267,7 @@ class StateManager:
             },
             # 3. Healthcare, Hospitals, Clinics & Diagnostics
             {
-                "id": "prof_healthcare_specialty",
+                "id": "prof_specialty_clinics",
                 "name": "Private Healthcare & Specialty Clinics",
                 "industry": "Healthcare, Hospitals, Clinics and Diagnostics",
                 "subcategory": "Outpatient Multi-Specialty Clinics",
