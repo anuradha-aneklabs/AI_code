@@ -115,3 +115,27 @@ class TestCalendarApiEndpoints:
         assert data.get("success") is True
         assert "ics_invite" in data
         assert "BEGIN:VCALENDAR" in data["ics_invite"]
+
+    def test_free_google_and_outlook_calendar_links(self):
+        from datetime import datetime, timezone
+        from harvey.integrations.calendar import (
+            generate_google_calendar_url,
+            generate_outlook_calendar_url,
+        )
+
+        dt = datetime(2026, 11, 20, 14, 0, tzinfo=timezone.utc)
+        g_url = generate_google_calendar_url("Harvey AI Discovery", dt, 15, "Intro discussion")
+        assert "calendar.google.com/calendar/render" in g_url
+        assert "action=TEMPLATE" in g_url
+        assert "Harvey+AI+Discovery" in g_url or "Harvey%20AI%20Discovery" in g_url
+
+        o_url = generate_outlook_calendar_url("Harvey AI Discovery", dt, 15, "Intro discussion")
+        assert "outlook.live.com/calendar/0/deeplink/compose" in o_url
+        assert "Harvey+AI+Discovery" in o_url or "Harvey%20AI%20Discovery" in o_url
+
+        client = CalendarClient()
+        links = client.generate_free_meeting_links("Demo Call", dt, 20)
+        assert "google_calendar_url" in links
+        assert "outlook_calendar_url" in links
+        assert "ics_invite" in links
+        assert "BEGIN:VCALENDAR" in links["ics_invite"]

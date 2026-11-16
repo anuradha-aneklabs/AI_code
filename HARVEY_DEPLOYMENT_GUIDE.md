@@ -148,3 +148,4 @@ When running in production, adhere to the following operational invariants:
 2. **Paced Outbound Volume:** Configure `channels.email.daily_limit: 30` (or lower for newly warmed domains).
 3. **Dedicated Outbound Domains:** Never send cold outreach from your primary corporate email domain. Use secondary domains configured with SPF, DKIM, and DMARC records.
 4. **Token Security:** The dashboard bearer token in `data/dashboard-token` must be kept private and rotated periodically.
+

@@ -124,3 +124,4 @@ Harvey's dual mail architecture is production-ready:
 - **Gmail** is actively connected and live-verified with proof in the sender's Sent folder.
 - **Microsoft 365** is fully implemented with all unit tests passing, awaiting only the operator's Azure Entra ID app credentials.
 - During a client demonstration, the operator can confidently showcase the entire cold outreach pipeline with 100% human review safety.
+

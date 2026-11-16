@@ -16,6 +16,7 @@ from harvey.integrations.email_finder import (
     find_email,
     generate_patterns,
     infer_pattern_from_email,
+    verify_free_deliverability,
     _status_from_verdict,
     _translate_hunter_pattern,
 )
@@ -254,3 +255,72 @@ async def test_derive_pattern_spends_and_respects_hunter_budget(state, monkeypat
     _, source, _ = await derive_pattern("second-co.com", state=state)
     assert source == "default"
     assert calls == ["first-co.com"]
+
+
+# ── Free Deliverability Hygiene Engine Tests ──
+
+
+@pytest.mark.asyncio
+async def test_verify_free_deliverability_syntax_invalid():
+    res = await verify_free_deliverability("invalid-email-address")
+    assert res["status"] == "invalid"
+    assert res["syntax_valid"] is False
+    assert res["deliverable"] is False
+
+    res_empty = await verify_free_deliverability("")
+    assert res_empty["status"] == "invalid"
+    assert res_empty["syntax_valid"] is False
+
+
+@pytest.mark.asyncio
+async def test_verify_free_deliverability_disposable():
+    res = await verify_free_deliverability("tempuser@mailinator.com")
+    assert res["status"] == "invalid"
+    assert res["is_disposable"] is True
+    assert res["deliverable"] is False
+    assert res["reason"] == "disposable_domain"
+
+
+@pytest.mark.asyncio
+async def test_verify_free_deliverability_no_mx(monkeypatch):
+    async def no_mx(domain):
+        return None
+    monkeypatch.setattr(ef, "get_mx_host", no_mx)
+
+    res = await verify_free_deliverability("user@nowhere-fake-domain-123.com")
+    assert res["status"] == "invalid"
+    assert res["has_mx"] is False
+    assert res["deliverable"] is False
+    assert res["reason"] == "no_mx_record"
+
+
+@pytest.mark.asyncio
+async def test_verify_free_deliverability_role_email(monkeypatch):
+    async def google_mx(domain):
+        return "aspmx.l.google.com"
+    monkeypatch.setattr(ef, "get_mx_host", google_mx)
+
+    res = await verify_free_deliverability("info@acme.com")
+    assert res["status"] == "risky"
+    assert res["is_role"] is True
+    assert res["deliverable"] is False
+    assert res["reason"] == "role_mailbox"
+    assert res["has_mx"] is True
+    assert res["mx_type"] == "google"
+
+
+@pytest.mark.asyncio
+async def test_verify_free_deliverability_valid_candidate(monkeypatch):
+    async def google_mx(domain):
+        return "aspmx.l.google.com"
+    monkeypatch.setattr(ef, "get_mx_host", google_mx)
+
+    res = await verify_free_deliverability("jane.doe@acme.com")
+    assert res["status"] == "valid"
+    assert res["deliverable"] is True
+    assert res["syntax_valid"] is True
+    assert res["is_disposable"] is False
+    assert res["is_role"] is False
+    assert res["has_mx"] is True
+    assert res["mx_type"] == "google"
+

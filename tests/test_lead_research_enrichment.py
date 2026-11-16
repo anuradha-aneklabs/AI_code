@@ -369,3 +369,79 @@ async def test_dashboard_research_api_endpoints():
     assert data["success"] is True
     assert "ApexCloud" in data["data"]["company_name"]
     assert data["data"]["domain"] == "apexcloud.io"
+
+
+# =====================================================================
+# 9. FREE ALTERNATIVE EXTRACTION (SOCIAL PROFILES & DECISION MAKERS)
+# =====================================================================
+
+@pytest.mark.asyncio
+async def test_free_alternative_social_and_decision_maker_extraction(monkeypatch):
+    """Verify that PublicWebResearchProvider extracts social profiles and decision makers
+    from public HTML without requiring paid Scavio or TinyFish API keys."""
+    sample_html = """
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <title>Nova Dynamics - Cloud & AI Architecture</title>
+        <meta name="description" content="Nova Dynamics builds enterprise distributed systems.">
+        <script type="application/ld+json">
+        {
+            "@context": "https://schema.org",
+            "@type": "Person",
+            "name": "Evelyn Reed",
+            "jobTitle": "Chief Executive Officer",
+            "email": "evelyn@novadynamics.io"
+        }
+        </script>
+    </head>
+    <body>
+        <h1>Nova Dynamics</h1>
+        <p>Enterprise cloud platform and SaaS infrastructure.</p>
+        <div class="team">
+            <h2>Our Leadership</h2>
+            <h3>Marcus Vance</h3>
+            <span>VP of Engineering</span>
+        </div>
+        <footer>
+            <a href="https://linkedin.com/company/nova-dynamics-io?trk=public">LinkedIn</a>
+            <a href="https://twitter.com/novadynamics">Twitter</a>
+            <a href="https://github.com/nova-dynamics">GitHub</a>
+            <a href="/about">About Us</a>
+        </footer>
+    </body>
+    </html>
+    """
+
+    import httpx
+    provider = PublicWebResearchProvider(timeout=5.0)
+
+    class DummyClient:
+        async def __aenter__(self):
+            return self
+        async def __aexit__(self, *args):
+            pass
+        async def get(self, url):
+            return httpx.Response(200, text=sample_html, request=httpx.Request("GET", url))
+
+    monkeypatch.setattr("harvey.enrichment.public_http_client", lambda timeout=8.0: DummyClient())
+
+    res = await provider.research_company("novadynamics.io", company_name="Nova Dynamics")
+
+    # 1. Social profiles verified
+    assert "linkedin" in res.social_profiles
+    assert "nova-dynamics" in res.social_profiles["linkedin"]
+    assert "twitter" in res.social_profiles
+    assert "github" in res.social_profiles
+
+    # 2. Decision makers verified from Schema.org JSON-LD
+    assert len(res.decision_makers) >= 1
+    ceo = next((dm for dm in res.decision_makers if "Evelyn" in dm["name"]), None)
+    assert ceo is not None
+    assert "Chief Executive Officer" in ceo["title"]
+    assert ceo["email"] == "evelyn@novadynamics.io"
+
+    # 3. Verified facts include discovered facts
+    assert any("social profiles" in f.lower() for f in res.verified_facts)
+    assert any("decision maker" in f.lower() or "leadership" in f.lower() for f in res.verified_facts)
+

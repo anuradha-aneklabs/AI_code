@@ -221,6 +221,163 @@ async def get_mx_host(domain: str) -> Optional[str]:
         return None
 
 
+async def verify_free_deliverability(email: str) -> dict:
+    """Zero-cost local deliverability and hygiene check for an email address.
+
+    Performs:
+    1. RFC 5322 syntax structure validation
+    2. Disposable / temporary email domain blocklist check
+    3. Role-based mailbox detection (info@, sales@, etc.)
+    4. DNS MX record validation and host classification
+    5. DNS SPF & DMARC presence check (via DNS TXT queries)
+
+    Returns a dict with deliverability status and detailed flags:
+    {
+        "email": str,
+        "deliverable": bool,
+        "status": "valid" | "risky" | "invalid",
+        "reason": str,
+        "syntax_valid": bool,
+        "is_disposable": bool,
+        "is_role": bool,
+        "has_mx": bool,
+        "mx_host": Optional[str],
+        "mx_type": str,
+        "has_spf": bool,
+        "has_dmarc": bool,
+    }
+    Never requires external paid APIs or subscription credits.
+    """
+    clean_email = (email or "").strip().lower()
+    if not clean_email or "@" not in clean_email:
+        return {
+            "email": clean_email,
+            "deliverable": False,
+            "status": "invalid",
+            "reason": "syntax_invalid",
+            "syntax_valid": False,
+            "is_disposable": False,
+            "is_role": False,
+            "has_mx": False,
+            "mx_host": None,
+            "mx_type": "none",
+            "has_spf": False,
+            "has_dmarc": False,
+        }
+
+    syntax_ok = validate_email_syntax(clean_email)
+    domain = clean_email.partition("@")[2]
+    is_disp = is_disposable_domain(domain)
+    is_role = is_role_email(clean_email)
+
+    if not syntax_ok:
+        return {
+            "email": clean_email,
+            "deliverable": False,
+            "status": "invalid",
+            "reason": "syntax_invalid",
+            "syntax_valid": False,
+            "is_disposable": is_disp,
+            "is_role": is_role,
+            "has_mx": False,
+            "mx_host": None,
+            "mx_type": "none",
+            "has_spf": False,
+            "has_dmarc": False,
+        }
+
+    if is_disp:
+        return {
+            "email": clean_email,
+            "deliverable": False,
+            "status": "invalid",
+            "reason": "disposable_domain",
+            "syntax_valid": True,
+            "is_disposable": True,
+            "is_role": is_role,
+            "has_mx": False,
+            "mx_host": None,
+            "mx_type": "none",
+            "has_spf": False,
+            "has_dmarc": False,
+        }
+
+    mx_host = await get_mx_host(domain)
+    if not mx_host:
+        return {
+            "email": clean_email,
+            "deliverable": False,
+            "status": "invalid",
+            "reason": "no_mx_record",
+            "syntax_valid": True,
+            "is_disposable": False,
+            "is_role": is_role,
+            "has_mx": False,
+            "mx_host": None,
+            "mx_type": "none",
+            "has_spf": False,
+            "has_dmarc": False,
+        }
+
+    mx_type = classify_mx(mx_host)
+
+    has_spf = False
+    has_dmarc = False
+    try:
+        loop = asyncio.get_event_loop()
+
+        def _check_txt():
+            spf_found = False
+            dmarc_found = False
+            try:
+                res = dns.resolver.Resolver()
+                res.lifetime = 1.0
+                res.timeout = 1.0
+                txts = res.resolve(domain, "TXT")
+                for r in txts:
+                    s = b"".join(r.strings).decode("utf-8", "replace").lower()
+                    if s.startswith("v=spf1"):
+                        spf_found = True
+                        break
+            except Exception:
+                pass
+            try:
+                res = dns.resolver.Resolver()
+                res.lifetime = 1.0
+                res.timeout = 1.0
+                dmarcs = res.resolve(f"_dmarc.{domain}", "TXT")
+                for r in dmarcs:
+                    s = b"".join(r.strings).decode("utf-8", "replace").lower()
+                    if s.startswith("v=dmarc1"):
+                        dmarc_found = True
+                        break
+            except Exception:
+                pass
+            return spf_found, dmarc_found
+
+        has_spf, has_dmarc = await loop.run_in_executor(None, _check_txt)
+    except Exception:
+        pass
+
+    status = "risky" if is_role else "valid"
+    reason = "role_mailbox" if is_role else "deliverable"
+
+    return {
+        "email": clean_email,
+        "deliverable": not is_role,
+        "status": status,
+        "reason": reason,
+        "syntax_valid": True,
+        "is_disposable": False,
+        "is_role": is_role,
+        "has_mx": True,
+        "mx_host": mx_host,
+        "mx_type": mx_type,
+        "has_spf": has_spf,
+        "has_dmarc": has_dmarc,
+    }
+
+
 # ── Pattern derivation ──
 
 def infer_pattern_from_email(email: str, first: str, last: str) -> Optional[str]:
@@ -704,6 +861,15 @@ async def _verify_candidate(email: str, mx_type: str, env) -> tuple[Optional[str
     hunter_key = _hunter_api_key()
 
     catch_all_seen = False
+
+    # Free local deliverability hygiene pre-check:
+    # Catches syntax errors, disposable domains, missing MX, or role mailboxes
+    # before calling any paid provider or when running in 100% free mode.
+    free_hygiene = await verify_free_deliverability(email)
+    if not free_hygiene.get("syntax_valid") or free_hygiene.get("is_disposable") or not free_hygiene.get("has_mx"):
+        return "invalid", False
+    if free_hygiene.get("is_role"):
+        return "risky", False
 
     # Big providers: ZeroBounce first (its engine cracks their catch-alls),
     # then Reoon, then Hunter. SMTP is useless/misleading here.

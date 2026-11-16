@@ -134,3 +134,4 @@ Test connectivity without sending:
 ## 6. Conclusion
 
 Microsoft 365 integration in Harvey is fully implemented, thoroughly tested with 73 passing unit tests, and completely wired for live operation. As soon as the operator supplies the `M365_CLIENT_ID` from Entra ID, live email sending and inbox synchronization can be authorized in under two minutes.
+

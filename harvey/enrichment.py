@@ -73,6 +73,9 @@ class CompanyResearchData:
     inferred_observations: list[str] = field(default_factory=list)
     unknown_fields: list[str] = field(default_factory=list)
     sources: list[dict[str, Any]] = field(default_factory=list)
+    decision_makers: list[dict[str, Any]] = field(default_factory=list)
+    social_profiles: dict[str, str] = field(default_factory=dict)
+    deep_crawl_pages: list[str] = field(default_factory=list)
     confidence: float = 0.5
     is_sample: bool = False
 
@@ -91,6 +94,9 @@ class CompanyResearchData:
             "inferred_observations": self.inferred_observations,
             "unknown_fields": self.unknown_fields,
             "sources": self.sources,
+            "decision_makers": self.decision_makers,
+            "social_profiles": self.social_profiles,
+            "deep_crawl_pages": self.deep_crawl_pages,
             "confidence": round(self.confidence, 2),
             "is_sample": self.is_sample,
         }
@@ -165,6 +171,8 @@ class PublicWebResearchProvider(CompanyResearchProvider):
         html = ""
         resolved_url = website_url
         sources: list[dict[str, Any]] = []
+        deep_crawl_pages: list[str] = []
+        extra_htmls: list[str] = []
 
         try:
             async with public_http_client(timeout=self.timeout) as client:
@@ -172,6 +180,31 @@ class PublicWebResearchProvider(CompanyResearchProvider):
                 if resp.status_code == 200:
                     html = resp.text
                     resolved_url = str(resp.url)
+                    deep_crawl_pages.append(resolved_url)
+
+                    # Subpage Discovery: Find and fetch top /about, /team, or /contact pages
+                    subpages_to_crawl = []
+                    for m_link in re.finditer(r'href=[\'"]([^\'"]+)[\'"]', html, re.I):
+                        href = m_link.group(1).strip()
+                        if any(target in href.lower() for target in ("/about", "/team", "/leadership", "/contact", "/people")):
+                            if href.startswith("/") and len(href) > 1 and not href.startswith("//"):
+                                full_sub = f"https://{clean_domain}{href}"
+                                if full_sub not in subpages_to_crawl and full_sub != resolved_url:
+                                    subpages_to_crawl.append(full_sub)
+                            elif href.startswith(f"https://{clean_domain}") or href.startswith(f"http://{clean_domain}"):
+                                if href not in subpages_to_crawl and href != resolved_url:
+                                    subpages_to_crawl.append(href)
+                        if len(subpages_to_crawl) >= 2:
+                            break
+
+                    for sub_url in subpages_to_crawl:
+                        try:
+                            sub_resp = await client.get(sub_url)
+                            if sub_resp.status_code == 200:
+                                extra_htmls.append(sub_resp.text)
+                                deep_crawl_pages.append(str(sub_resp.url))
+                        except Exception:
+                            pass
                 else:
                     # Fallback to HTTP if HTTPS fails
                     http_url = f"http://{clean_domain}"
@@ -179,6 +212,7 @@ class PublicWebResearchProvider(CompanyResearchProvider):
                     if resp_http.status_code == 200:
                         html = resp_http.text
                         resolved_url = str(resp_http.url)
+                        deep_crawl_pages.append(resolved_url)
                     else:
                         sources.append(ResearchSource(
                             field="website",
@@ -325,12 +359,96 @@ class PublicWebResearchProvider(CompanyResearchProvider):
         if not potential_needs:
             potential_needs.append(f"Inquiry follow-up and client outreach automation for {extracted_name}")
 
+        # 7. Social Profiles Extraction (Replaces paid Scavio social scraper)
+        combined_html = html + " " + " ".join(extra_htmls)
+        social_profiles: dict[str, str] = {}
+        for platform, pattern in (
+            ("linkedin", r'href=[\'"](https?://(?:www\.)?linkedin\.com/(?:company|in)/[^\'"]+)[\'"]'),
+            ("twitter", r'href=[\'"](https?://(?:www\.)?(?:twitter|x)\.com/[^\'"]+)[\'"]'),
+            ("github", r'href=[\'"](https?://(?:www\.)?github\.com/[^\'"]+)[\'"]'),
+            ("facebook", r'href=[\'"](https?://(?:www\.)?facebook\.com/[^\'"]+)[\'"]'),
+            ("instagram", r'href=[\'"](https?://(?:www\.)?instagram\.com/[^\'"]+)[\'"]'),
+            ("youtube", r'href=[\'"](https?://(?:www\.)?youtube\.com/(?:@|channel|c/)[^\'"]+)[\'"]'),
+        ):
+            m_soc = re.search(pattern, combined_html, re.I)
+            if m_soc:
+                clean_soc = m_soc.group(1).split("?")[0].rstrip("/")
+                if "sharer" not in clean_soc.lower() and "intent/tweet" not in clean_soc.lower():
+                    social_profiles[platform] = clean_soc
+
+        # 8. Decision Maker & Leadership Extraction (Replaces paid Scavio decision maker finder)
+        decision_makers: list[dict[str, Any]] = []
+        # A. Schema.org JSON-LD extraction
+        for raw_j in re.findall(r'<script[^>]+type=[\'"]application/ld\+json[\'"][^>]*>(.*?)</script>', combined_html, re.I | re.S):
+            try:
+                import json
+                jdata = json.loads(raw_j.strip())
+                items = jdata if isinstance(jdata, list) else [jdata]
+                for itm in items:
+                    if isinstance(itm, dict):
+                        if itm.get("@type") == "Person" and itm.get("name"):
+                            decision_makers.append({
+                                "name": itm.get("name"),
+                                "title": itm.get("jobTitle") or "Executive",
+                                "email": itm.get("email") or "",
+                            })
+                        for rel in ("founder", "founders", "employee", "employees"):
+                            rel_val = itm.get(rel)
+                            if isinstance(rel_val, list):
+                                for p in rel_val:
+                                    if isinstance(p, dict) and p.get("name"):
+                                        decision_makers.append({
+                                            "name": p.get("name"),
+                                            "title": p.get("jobTitle") or "Founder",
+                                            "email": p.get("email") or "",
+                                        })
+                            elif isinstance(rel_val, dict) and rel_val.get("name"):
+                                decision_makers.append({
+                                    "name": rel_val.get("name"),
+                                    "title": rel_val.get("jobTitle") or "Founder",
+                                    "email": rel_val.get("email") or "",
+                                })
+            except Exception:
+                pass
+
+        # B. HTML team / leadership heuristic extraction
+        if not decision_makers:
+            dm_patterns = [
+                r'<(?:h2|h3|h4|strong|b)[^>]*>\s*([A-Z][a-z]+(?:\s+[A-Z][a-z]+)+)\s*<\/(?:h2|h3|h4|strong|b)>\s*<(?:p|span|div)[^>]*>\s*(CEO|Chief\s+Executive\s+Officer|Founder|Co-Founder|President|Managing\s+Director|Owner|Partner|CTO|VP\s+of\s+[A-Za-z]+)\s*<\/(?:p|span|div)>',
+                r'<(?:h2|h3|h4|p|span)[^>]*>\s*([A-Z][a-z]+(?:\s+[A-Z][a-z]+)+)\s*[\-\–\|\,]\s*(CEO|Founder|Co-Founder|President|Managing\s+Director|Owner|Partner|CTO|VP)\s*<\/(?:h2|h3|h4|p|span)>',
+            ]
+            for pat in dm_patterns:
+                for match in re.finditer(pat, combined_html, re.I):
+                    name, title = match.group(1).strip(), match.group(2).strip()
+                    if 3 < len(name) < 40 and len(name.split()) >= 2 and not any(w in name.lower() for w in ("about", "contact", "privacy", "terms", "our team", "leadership team")):
+                        decision_makers.append({"name": name, "title": title, "email": ""})
+
         verified_facts = [
             f"Official domain '{clean_domain}' resolved successfully",
             f"Company website is active at {resolved_url}",
         ]
         if tech_detected:
             verified_facts.append(f"Detected web technology: {', '.join(tech_detected[:4])}")
+        if social_profiles:
+            sources.append(ResearchSource(
+                field="social_profiles",
+                source_url=resolved_url,
+                source_title="Company Social Profiles",
+                status="verified",
+                confidence=0.90,
+            ).to_dict())
+            verified_facts.append(f"Public social profiles verified: {', '.join(social_profiles.keys())}")
+        if decision_makers:
+            sources.append(ResearchSource(
+                field="decision_makers",
+                source_url=resolved_url,
+                source_title="Company Leadership Directory",
+                status="verified",
+                confidence=0.88,
+            ).to_dict())
+            verified_facts.append(f"Identified decision maker: {decision_makers[0]['name']} ({decision_makers[0].get('title', 'Executive')})")
+        if len(deep_crawl_pages) > 1:
+            verified_facts.append(f"Deep crawled {len(deep_crawl_pages)} internal company pages")
 
         inferred_observations = [
             f"Industry categorized as '{industry}' based on public web text",
@@ -358,6 +476,9 @@ class PublicWebResearchProvider(CompanyResearchProvider):
             inferred_observations=inferred_observations,
             unknown_fields=unknown_fields,
             sources=sources,
+            decision_makers=decision_makers,
+            social_profiles=social_profiles,
+            deep_crawl_pages=deep_crawl_pages,
             confidence=0.85,
             is_sample=False,
         )

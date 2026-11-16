@@ -243,6 +243,46 @@ async def verify_booking_url(url: str, timeout: float = 8.0) -> dict[str, Any]:
         }
 
 
+def generate_google_calendar_url(
+    title: str,
+    start_dt: datetime,
+    duration_minutes: int = 15,
+    description: str = "",
+    location: str = "Google Meet / Phone Call",
+) -> str:
+    """Generate a 1-click Google Calendar meeting creation link (100% free, no API key needed)."""
+    from urllib.parse import quote_plus
+    dt_format = "%Y%m%dT%H%M%SZ"
+    if start_dt.tzinfo is None:
+        start_utc = start_dt.replace(tzinfo=timezone.utc)
+    else:
+        start_utc = start_dt.astimezone(timezone.utc)
+    end_utc = start_utc + timedelta(minutes=duration_minutes)
+    dates_param = f"{start_utc.strftime(dt_format)}/{end_utc.strftime(dt_format)}"
+    base = "https://calendar.google.com/calendar/render"
+    return f"{base}?action=TEMPLATE&text={quote_plus(title)}&dates={dates_param}&details={quote_plus(description)}&location={quote_plus(location)}"
+
+
+def generate_outlook_calendar_url(
+    title: str,
+    start_dt: datetime,
+    duration_minutes: int = 15,
+    description: str = "",
+    location: str = "Teams / Phone Call",
+) -> str:
+    """Generate a 1-click Outlook Web Calendar event creation link (100% free, no API key needed)."""
+    from urllib.parse import quote_plus
+    if start_dt.tzinfo is None:
+        start_utc = start_dt.replace(tzinfo=timezone.utc)
+    else:
+        start_utc = start_dt.astimezone(timezone.utc)
+    end_utc = start_utc + timedelta(minutes=duration_minutes)
+    start_iso = start_utc.strftime("%Y-%m-%dT%H:%M:%SZ")
+    end_iso = end_utc.strftime("%Y-%m-%dT%H:%M:%SZ")
+    base = "https://outlook.live.com/calendar/0/deeplink/compose"
+    return f"{base}?subject={quote_plus(title)}&startdt={start_iso}&enddt={end_iso}&body={quote_plus(description)}&location={quote_plus(location)}"
+
+
 class CalendarClient:
     """Manages calendar integrations, available slot discovery, and meeting bookings."""
 
@@ -298,6 +338,31 @@ class CalendarClient:
             return f"https://tidycal.com/{clean_user}/{clean_slug}"
         else:  # Cal.com default
             return f"https://cal.com/{clean_user}/{clean_slug}"
+
+    def generate_free_meeting_links(
+        self,
+        title: str,
+        start_dt: datetime,
+        duration_minutes: int = 15,
+        description: str = "",
+        location: str = "Google Meet / Phone Call",
+        prospect_email: str = "",
+        prospect_name: str = "",
+    ) -> dict[str, str]:
+        """Generate free, 1-click meeting links (Google Calendar, Outlook Web, and ICS invite)
+        without requiring paid Cal.com or Calendly subscriptions."""
+        return {
+            "google_calendar_url": generate_google_calendar_url(title, start_dt, duration_minutes, description, location),
+            "outlook_calendar_url": generate_outlook_calendar_url(title, start_dt, duration_minutes, description, location),
+            "ics_invite": self.generate_ics_invite(
+                prospect_email=prospect_email,
+                prospect_name=prospect_name,
+                slot_start=start_dt.isoformat(),
+                duration_minutes=duration_minutes,
+                summary=title,
+                description=description,
+            ),
+        }
 
     async def get_available_slots(
         self,

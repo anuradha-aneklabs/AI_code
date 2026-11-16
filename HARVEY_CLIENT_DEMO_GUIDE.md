@@ -154,3 +154,4 @@ Close the demonstration with a concrete pilot proposal:
 1. **Pilot Scope:** 14-day evaluation on a dedicated secondary outbound domain.
 2. **Setup Time:** 15 minutes to configure `.env` with the client's Gmail or Microsoft 365 mailbox.
 3. **Success Milestone:** Generate the first 50 qualified leads and stage approved outreach drafts for sales management review.
+
