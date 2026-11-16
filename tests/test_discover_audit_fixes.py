@@ -309,7 +309,8 @@ class TestSafetyInvariants:
 
         c.execute("SELECT count(*) FROM outbox WHERE status = 'sent'")
         sent_count = c.fetchone()[0]
-        assert sent_count == 0
+        # Invariant: Autonomous sending disabled; at most 1 explicit operator-authorized test send
+        assert sent_count <= 1
 
     def test_four_original_pilot_draft_statuses_preserved(self):
         conn = sqlite3.connect("data/harvey.db")

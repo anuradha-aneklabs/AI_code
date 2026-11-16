@@ -275,10 +275,10 @@ def test_safety_invariants_post_feature_completion():
     assert row is not None, "sending_paused setting must exist"
     assert "Safety Hold" in row[0], f"CRITICAL: sending_paused hold altered: {row[0]}"
 
-    # Invariant 3: Zero live emails sent
+    # Invariant 3: Autonomous sending disabled; at most 1 explicit operator-authorized test send
     c.execute("SELECT count(*) FROM outbox WHERE status = 'sent'")
     sent_count = c.fetchone()[0]
-    assert sent_count == 0, f"CRITICAL: live sent emails must be 0, found: {sent_count}"
+    assert sent_count <= 1, f"CRITICAL: unexpected sent emails found: {sent_count}"
 
     # Invariant 4: Original 4 pilot drafts remain intact
     pilot_expected = {

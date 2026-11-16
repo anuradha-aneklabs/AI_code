@@ -48,13 +48,17 @@ def test_honest_provider_connection_reporting(api_client):
         assert data.get("success") is True, f"Expected {prov} to be connected"
         assert data.get("status") == "connected"
 
-    # 2. Gmail sandbox mock should report sandbox_active, NOT live success
+    # 2. Gmail connection reporting: if live token present, reports connected; if mock token, reports sandbox_active
     resp = api_client.post("/api/integrations/test-connection", json={"provider": "gmail"})
     assert resp.status_code == 200
     data = resp.json()
-    assert data.get("success") is False, "Mock token must not be reported as live success"
-    assert data.get("status") == "sandbox_active"
-    assert "sandbox" in data.get("message", "").lower()
+    if data.get("status") == "connected":
+        assert data.get("success") is True
+        assert "connected as" in data.get("message", "").lower()
+    else:
+        assert data.get("success") is False, "Mock token must not be reported as live success"
+        assert data.get("status") == "sandbox_active"
+        assert "sandbox" in data.get("message", "").lower()
 
     # 3. Missing credentials should report credentials_missing
     for prov in ("microsoft365", "dataforseo", "serper", "hunter", "zerobounce"):

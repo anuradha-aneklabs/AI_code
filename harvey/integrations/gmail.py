@@ -44,8 +44,8 @@ READONLY_SCOPE = "https://www.googleapis.com/auth/gmail.readonly"
 SEND_SCOPE = "https://www.googleapis.com/auth/gmail.send"
 MODIFY_SCOPE = "https://www.googleapis.com/auth/gmail.modify"
 SEND_SCOPES = f"{READONLY_SCOPE} {SEND_SCOPE}"
-DEFAULT_SCOPE = SEND_SCOPES
-SCOPE = SEND_SCOPES
+DEFAULT_SCOPE = READONLY_SCOPE
+SCOPE = READONLY_SCOPE
 LOOPBACK_PORT = 8765
 MAX_INBOX_PAGES = 40
 # A full 7-day read runs at least this often, whatever the history says.
@@ -275,17 +275,20 @@ class GmailProvider(MailProvider):
                 return SendResult(ok=False, error=f"Safety block: {to_email} is not in the approved test-recipient allowlist.")
         msg = EmailMessage()
         persona = self.config.persona
-        auth_email = getattr(self, "_authenticated_email", "")
-        if not auth_email:
-            try:
-                prof = await self._request("GET", "/profile")
-                if prof and prof.get("emailAddress"):
-                    auth_email = prof["emailAddress"]
-                    self._authenticated_email = auth_email
-            except Exception:
-                pass
-        sender_email = auth_email or persona.email
-        sender_name = persona.name or "Harvey AI Sales Agent"
+        sender_email = getattr(persona, "email", "")
+        sender_name = getattr(persona, "name", "")
+        if not is_mocked:
+            auth_email = getattr(self, "_authenticated_email", "")
+            if not auth_email:
+                try:
+                    prof = await self._request("GET", "/profile")
+                    if prof and prof.get("emailAddress"):
+                        auth_email = prof["emailAddress"]
+                        self._authenticated_email = auth_email
+                except Exception:
+                    pass
+            sender_email = auth_email or sender_email
+            sender_name = sender_name or "Harvey AI Sales Agent"
         msg["To"] = to_email
         msg["From"] = f"{sender_name} <{sender_email}>" if sender_email else sender_name
         msg["Subject"] = subject

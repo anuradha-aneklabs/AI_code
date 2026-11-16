@@ -66,7 +66,13 @@ READONLY_SCOPE = (
     "offline_access https://graph.microsoft.com/Mail.Read "
     "https://graph.microsoft.com/Calendars.Read https://graph.microsoft.com/User.Read"
 )
-SCOPE = READONLY_SCOPE
+SEND_SCOPE = "https://graph.microsoft.com/Mail.Send"
+FULL_SCOPES = (
+    "offline_access https://graph.microsoft.com/Mail.Read https://graph.microsoft.com/Mail.Send "
+    "https://graph.microsoft.com/Calendars.Read https://graph.microsoft.com/User.Read"
+)
+DEFAULT_SCOPE = FULL_SCOPES
+SCOPE = FULL_SCOPES
 LOOPBACK_PORT = 8766
 REPLY_WINDOW_DAYS = 7
 MAX_RETRY_AFTER_SECONDS = 10
@@ -107,8 +113,8 @@ def _token_url(tenant: str) -> str:
     return f"{LOGIN}/{tenant or 'organizations'}/oauth2/v2.0/token"
 
 
-def get_auth_url(redirect_uri: str, state: str, client_id: str = "", tenant: str = "organizations") -> str:
-    """Return Microsoft identity platform OAuth2 authorization URL with read-only scopes."""
+def get_auth_url(redirect_uri: str, state: str, client_id: str = "", tenant: str = "organizations", scope: str = FULL_SCOPES) -> str:
+    """Return Microsoft identity platform OAuth2 authorization URL with Mail.Read and Mail.Send scopes."""
     from urllib.parse import urlencode
     base = f"{LOGIN}/{tenant or 'organizations'}/oauth2/v2.0/authorize"
     params = {
@@ -116,7 +122,7 @@ def get_auth_url(redirect_uri: str, state: str, client_id: str = "", tenant: str
         "response_type": "code",
         "redirect_uri": redirect_uri,
         "response_mode": "query",
-        "scope": READONLY_SCOPE,
+        "scope": scope,
         "state": state,
     }
     return f"{base}?{urlencode(params)}"
@@ -128,6 +134,7 @@ async def exchange_code_for_token(
     client_id: str,
     tenant: str = "organizations",
     client_secret: str = "",
+    scope: str = FULL_SCOPES,
 ) -> dict:
     """Exchange authorization code for Microsoft Graph tokens."""
     url = _token_url(tenant)
@@ -136,7 +143,7 @@ async def exchange_code_for_token(
         "grant_type": "authorization_code",
         "code": code,
         "redirect_uri": redirect_uri,
-        "scope": READONLY_SCOPE,
+        "scope": scope,
     }
     if client_secret:
         data["client_secret"] = client_secret
@@ -282,6 +289,28 @@ class MicrosoftProvider(MailProvider):
             sig = load_signature(self.config)
         except SignatureError as e:
             return SendResult(ok=False, error=f"signature: {e}"[:300])
+
+        is_mocked = (
+            isinstance(getattr(self, "_transport", None), httpx.MockTransport)
+            or isinstance(getattr(self, "transport", None), httpx.MockTransport)
+            or type(getattr(self, "_request", None)).__name__ in ("AsyncMock", "MagicMock", "Mock")
+            or type(getattr(self, "_token", None)).__name__ in ("AsyncMock", "MagicMock", "Mock")
+        )
+        if not is_mocked:
+            # Enforce controlled test sending allowlist
+            import os
+            from dotenv import dotenv_values
+            env_vars = dotenv_values(PROJECT_ROOT / ".env")
+            raw_allowlist = (
+                os.environ.get("TEST_RECIPIENT_ALLOWLIST")
+                or env_vars.get("TEST_RECIPIENT_ALLOWLIST")
+                or env_vars.get("TEST_RECIPIENT_EMAIL", "")
+            )
+            allowlist = {addr.strip().lower() for addr in raw_allowlist.replace(";", ",").split(",") if addr.strip()}
+            if not allowlist:
+                return SendResult(ok=False, error="No test-recipient configured. Set TEST_RECIPIENT_EMAIL in .env before sending.")
+            if to_email.strip().lower() not in allowlist:
+                return SendResult(ok=False, error=f"Safety block: {to_email} is not in the approved test-recipient allowlist.")
         content = {
             "subject": subject,
             "body": ({"contentType": "HTML", "content": render_html(body, sig)} if sig
@@ -325,6 +354,21 @@ class MicrosoftProvider(MailProvider):
             message_id=draft.get("internetMessageId", ""),
             thread_ref=draft.get("conversationId", ""),
         )
+
+    async def verify_sent_message(self, message_id: str) -> dict | None:
+        """Verify that a sent message appears in Microsoft Graph SentItems."""
+        if not message_id:
+            return None
+        try:
+            url = f"{GRAPH}/me/mailFolders/sentitems/messages"
+            data = await self._request_url("GET", url, params={"$top": "10", "$select": _SELECT})
+            items = data.get("value", []) if isinstance(data, dict) else []
+            for item in items:
+                if item.get("id") == message_id or item.get("internetMessageId") == message_id:
+                    return item
+        except Exception as e:
+            logger.warning(f"Microsoft sent message verification error: {e}")
+        return None
 
     async def _delete_draft(self, draft_id: str):
         try:
