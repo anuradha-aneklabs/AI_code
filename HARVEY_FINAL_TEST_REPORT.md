@@ -20,7 +20,7 @@ Every layer of the Harvey AI Sales Agent platform was evaluated through dedicate
 ├─────────────────────────────────────┬───────────────────┬──────────────┤
 │ Test Suite Category                 │ Result / Metric   │ Pass Rate    │
 ├─────────────────────────────────────┼───────────────────┼──────────────┤
-│ 1. Pytest Full Regression Suite     │ 3,164 PASS / 184 S│ 100.0%       │
+│ 1. Pytest Full Suite (incl. Live Gap)│ 3,173 PASS / 184 S│ 100.0%       │
 │ 2. Playwright Comprehensive UI Suite│ 15/15 Tabs PASS   │ 100.0%       │
 │ 3. 10-Industry Multi-Vertical Suite │ 10/10 Verticals P │ 100.0%       │
 │ 4. Local AI & Dense RAG Suite       │ 100% Passed       │ 100.0%       │
@@ -149,6 +149,22 @@ Every layer of the Harvey AI Sales Agent platform was evaluated through dedicate
 
 ---
 
+### Suite 8: Live Gap Features & Outreach Suite
+- **Test Files:**
+  - [tests/test_linkedin_drafting_live.py](file:///C:/Users/aneka/Desktop/harvey/tests/test_linkedin_drafting_live.py) (2 tests, PASS)
+  - [tests/test_gap_features_live.py](file:///C:/Users/aneka/Desktop/harvey/tests/test_gap_features_live.py) (7 tests, PASS)
+- **Scope & Results:**
+  - **Live LinkedIn Direct Message Generation:** Uses local Ollama (`qwen2.5:1.5b`) with foundational outreach skills (`skills/linkedin_outreach.md`) to generate personalized connection requests and message sequences.
+  - **Live DNS MX Resolution & Classification:** Live DNS MX lookup for `google.com` (classified as `google`) and `microsoft.com` (classified as `microsoft`).
+  - **Multi-Platform Booking Link Parser:** Parsed Cal.com, Calendly, and Google Calendar URLs with duration extraction.
+  - **Live Booking Link Liveness Check:** Live HTTP request to `https://cal.com/sales` verified link reachability (HTTP 200, redirect followed).
+  - **Local Business Hours RFC Slot Engine:** Generated 20 compliant business hour appointment slots without requiring external calendar read credentials.
+  - **RFC 5545 iCalendar (`.ics`) Invite Synthesis:** Validated standards-compliant calendar invite generation (`BEGIN:VCALENDAR`, `VEVENT`, `UID`, `ATTENDEE`).
+  - **Gmail OAuth Authorization URL Generator:** Verified endpoint `POST /api/gmail/auth-url` dynamically generates Google OAuth URL with locked scope `gmail.readonly`.
+
+---
+
 ## 3. Acceptance Sign-Off
 
 All tests have executed with a **100% pass rate** on active code. The Harvey AI Sales Agent platform is verified functionally complete, thoroughly tested, structurally sound, safe, and ready for deployment upon credential provisioning.
+
