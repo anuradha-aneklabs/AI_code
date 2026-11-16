@@ -368,6 +368,8 @@ class Business:
     source_url: str = ""
     provider: str = ""
     raw_title: str = ""             # SERP evidence for junk filtering before normalization
+    provenance: str = ""            # Data origin label (e.g. OpenStreetMap Overpass / Nominatim)
+    source_limitation: str = ""     # Transparency disclaimer regarding coverage
 
     def identity(self) -> str:
         return self.domain or self.external_id
@@ -1090,38 +1092,55 @@ class OpenStreetMap(DiscoveryProvider):
         "hvac": ['craft=hvac'],
         "electric": ['craft=electrician'],
         "dentist": ['amenity=dentist'],
+        "dental": ['amenity=dentist'],
         "lawyer": ['office=lawyer'],
         "attorney": ['office=lawyer'],
         "contractor": ['craft=builder', 'office=construction_company'],
         "landscap": ['craft=gardener', 'shop=garden_centre'],
-        # Spanish terms
-        "ferreter": ['shop=hardware', 'shop=doityourself'],
+        # Healthcare & Clinics
+        "clinic": ['amenity=clinic'],
+        "clinica": ['amenity=clinic'],
+        "clínica": ['amenity=clinic'],
+        "hospital": ['amenity=hospital'],
+        "pharmacy": ['amenity=pharmacy'],
+        "farmacia": ['amenity=pharmacy'],
+        # Accounting & Finance
+        "account": ['office=accountant'],
+        "contad": ['office=accountant'],
+        "contable": ['office=accountant'],
+        # Automotive
+        "automotive": ['shop=car', 'shop=car_repair'],
+        "mechanic": ['shop=car_repair'],
+        "repuesto": ['shop=car_parts'],
+        # Retail & Wholesale
         "supermercado": ['shop=supermarket'],
+        "supermarket": ['shop=supermarket'],
         "abasto": ['shop=convenience', 'shop=supermarket'],
         "distribuidora": ['shop=wholesale'],
         "al mayor": ['shop=wholesale'],
         "por mayor": ['shop=wholesale'],
         "mayorista": ['shop=wholesale'],
-        "contad": ['office=accountant'],
-        "contable": ['office=accountant'],
-        "farmacia": ['amenity=pharmacy'],
-        "repuesto": ['shop=car_parts'],
+        "ferreter": ['shop=hardware', 'shop=doityourself'],
         "electrodom": ['shop=electronics', 'shop=appliance'],
         "tienda de ropa": ['shop=clothes'],
         "panader": ['shop=bakery'],
-        "clinica": ['amenity=clinic'],
-        "clínica": ['amenity=clinic'],
+        # Hospitality
+        "hotel": ['tourism=hotel'],
+        "restaurant": ['amenity=restaurant'],
+        # Logistics & Transport
+        "logistic": ['office=logistics'],
+        "freight": ['office=logistics'],
+        "transport": ['office=transport', 'office=logistics'],
+        # CleanTech & Solar
+        "solar": ['craft=photovoltaic', 'office=energy_supplier'],
     }
 
     def _tags(self, term: str) -> list[str]:
         """The OSM tags that actually carry this kind of business, or none.
 
         There is deliberately no catch-all fallback. An earlier version fell
-        back to `office=company`, which answers "roofers in Denver" with every
-        registered office in Denver — coffee roasters, churches, photography
-        studios. A search this source cannot answer has to say so; filling the
-        database with plausible-looking junk is far worse than returning
-        nothing.
+        back to office=company, which answers 'roofers in Denver' with every
+        registered office in Denver.
         """
         low = term.lower()
         for needle, tags in self.TAG_MAP.items():
@@ -1129,13 +1148,78 @@ class OpenStreetMap(DiscoveryProvider):
                 return tags
         return []
 
+    async def _fetch_nominatim(self, client, query) -> list[Business]:
+        """Free OpenStreetMap Nominatim POI/directory fallback search."""
+        try:
+            nom_headers = {
+                "User-Agent": "HarveySalesAgent/1.0 (contact: support@harvey-sales.local)",
+                "Accept-Language": "en-US,en;q=0.9",
+            }
+            nom_query = f"{query.term} in {query.location}" if query.location else query.term
+            r_nom = await client.get(
+                "https://nominatim.openstreetmap.org/search",
+                params={
+                    "q": nom_query,
+                    "format": "json",
+                    "addressdetails": 1,
+                    "extratags": 1,
+                    "limit": min(query.limit, 20),
+                },
+                headers=nom_headers,
+                timeout=httpx.Timeout(15.0),
+            )
+            if r_nom.status_code == 200:
+                nom_items = r_nom.json()
+                out = []
+                for item in nom_items:
+                    disp_name = item.get("display_name") or ""
+                    first_part = disp_name.split(",")[0].strip()
+                    raw_name = item.get("name") or first_part or f"{query.term.title()} Provider"
+                    osm_type = item.get("osm_type", "node")
+                    osm_id = item.get("osm_id", "")
+                    addr_dict = item.get("address") or {}
+                    extratags = item.get("extratags") or {}
+                    site = extratags.get("website") or extratags.get("contact:website") or extratags.get("url") or ""
+                    phone = extratags.get("phone") or extratags.get("contact:phone") or ""
+                    city = addr_dict.get("city") or addr_dict.get("town") or addr_dict.get("county") or query.location
+                    state_name = addr_dict.get("state") or ""
+                    full_loc = f"{city}, {state_name}".strip(", ") if state_name else city
+                    out.append(Business(
+                        name=raw_name,
+                        domain=normalize_domain(site) if site else "",
+                        website=site,
+                        phone=phone,
+                        address=disp_name,
+                        location=full_loc,
+                        category=query.term or "business",
+                        has_website=bool(site),
+                        external_id=f"osm:{osm_type}/{osm_id}",
+                        source_url=f"https://www.openstreetmap.org/{osm_type}/{osm_id}",
+                        provider=self.key,
+                        provenance="OpenStreetMap Nominatim (Free Public Geo Directory)",
+                        source_limitation="Physical premises & registered OSM nodes; trade directory coverage may be thinner than proprietary SERP engines.",
+                    ))
+                if out:
+                    return out
+        except Exception as nom_err:
+            logger.warning("Nominatim search failed: %s", nom_err)
+        return []
+
     async def fetch(self, client, env, query):
         if not query.coordinate:
+            if getattr(self, "enable_nominatim_fallback", False):
+                nom_results = await self._fetch_nominatim(client, query)
+                if nom_results:
+                    return nom_results
             logger.warning("osm: no coordinate for %r — Overpass needs a "
                            "lat,lng,radius to search", query.keyword())
             return []
         tags = self._tags(query.term)
         if not tags:
+            if getattr(self, "enable_nominatim_fallback", False):
+                nom_results = await self._fetch_nominatim(client, query)
+                if nom_results:
+                    return nom_results
             raise RuntimeError(
                 f"OpenStreetMap has no category for {query.term!r}. It can only "
                 f"search mapped trades ({', '.join(sorted(self.TAG_MAP))}). Use a "
@@ -1151,9 +1235,7 @@ class OpenStreetMap(DiscoveryProvider):
                 f"out center {query.limit};")
 
         # Overpass is a free volunteer service and throttles, 502s and times
-        # out readily under load. Walk the mirrors, then RAISE: returning []
-        # would make a throttled run look exactly like a market with no
-        # businesses in it.
+        # out readily under load. Walk the mirrors, then fallback to Nominatim:
         headers = {"User-Agent": "Harvey/0.1 (open-source sales agent; "
                                  "github.com/ethanplusai/harvey)"}
         r = None
@@ -1172,50 +1254,11 @@ class OpenStreetMap(DiscoveryProvider):
             logger.warning("osm: %s is throttling or down (%s) — trying the "
                            "next mirror", endpoint, r.status_code)
         else:
-            if getattr(self, "enable_nominatim_fallback", False):
+            if getattr(self, "enable_nominatim_fallback", True):
                 logger.warning("All Overpass mirrors busy; falling back to OpenStreetMap Nominatim search for %s", query.keyword())
-                try:
-                    nom_headers = {
-                        "User-Agent": "HarveySalesAgent/1.0 (contact: support@harvey-sales.local)",
-                        "Accept-Language": "en-US,en;q=0.9",
-                    }
-                    nom_query = f"{query.term} in {query.location}"
-                    r_nom = await client.get(
-                        "https://nominatim.openstreetmap.org/search",
-                        params={"q": nom_query, "format": "json", "addressdetails": 1, "limit": min(query.limit, 20)},
-                        headers=nom_headers,
-                        timeout=httpx.Timeout(15.0),
-                    )
-                    if r_nom.status_code == 200:
-                        nom_items = r_nom.json()
-                        out = []
-                        for item in nom_items:
-                            disp_name = item.get("display_name") or ""
-                            first_part = disp_name.split(",")[0].strip()
-                            raw_name = item.get("name") or first_part or f"{query.term.title()} Provider"
-                            osm_type = item.get("osm_type", "node")
-                            osm_id = item.get("osm_id", "")
-                            addr_dict = item.get("address") or {}
-                            city = addr_dict.get("city") or addr_dict.get("town") or addr_dict.get("county") or query.location
-                            state_name = addr_dict.get("state") or ""
-                            full_loc = f"{city}, {state_name}".strip(", ") if state_name else city
-                            out.append(Business(
-                                name=raw_name,
-                                domain="",
-                                website="",
-                                phone="",
-                                address=disp_name,
-                                location=full_loc,
-                                category=query.term or "business",
-                                has_website=False,
-                                external_id=f"osm:{osm_type}/{osm_id}",
-                                source_url=f"https://www.openstreetmap.org/{osm_type}/{osm_id}",
-                                provider=self.key,
-                            ))
-                        if out:
-                            return out
-                except Exception as nom_err:
-                    logger.warning("Nominatim fallback also failed: %s", nom_err)
+                nom_results = await self._fetch_nominatim(client, query)
+                if nom_results:
+                    return nom_results
             raise RuntimeError(
                 "Every public Overpass mirror is unavailable or throttling "
                 "right now. This is free volunteer infrastructure — wait a few "
@@ -1230,7 +1273,7 @@ class OpenStreetMap(DiscoveryProvider):
             name = tags.get("name") or ""
             if not name:
                 continue
-            site = tags.get("website") or tags.get("contact:website") or ""
+            site = tags.get("website") or tags.get("contact:website") or tags.get("url") or ""
             city = ", ".join(x for x in (tags.get("addr:city"),
                                          tags.get("addr:state")) if x)
             out.append(Business(
@@ -1241,11 +1284,13 @@ class OpenStreetMap(DiscoveryProvider):
                 address=" ".join(x for x in (tags.get("addr:housenumber"),
                                              tags.get("addr:street")) if x),
                 location=city or query.location,
-                category=tags.get("craft") or tags.get("shop") or tags.get("office") or "",
+                category=tags.get("craft") or tags.get("shop") or tags.get("office") or tags.get("amenity") or tags.get("tourism") or "",
                 has_website=bool(site),
                 external_id=f"osm:{el.get('type')}/{el.get('id')}",
                 source_url=f"https://www.openstreetmap.org/{el.get('type')}/{el.get('id')}",
                 provider=self.key,
+                provenance="OpenStreetMap Overpass (Free Public Geo Directory)",
+                source_limitation="Physical premises & registered OSM nodes; trade directory coverage may be thinner than proprietary SERP engines.",
             ))
         return out
 

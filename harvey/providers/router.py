@@ -110,6 +110,10 @@ class TaskRouter:
         if not candidate_fallbacks:
             candidate_fallbacks = [p for p in ["groq", "gemini", "openrouter"] if p != self.primary_name]
 
+        # Always append local Ollama as the resilient zero-cost fallback
+        if "ollama" not in candidate_fallbacks and self.primary_name != "ollama":
+            candidate_fallbacks.append("ollama")
+
         for fb_name in candidate_fallbacks:
             # STRICT SAFEGUARD: Never fall back to xAI or paid providers
             if fb_name == "xai" and not self.config.get("xai_approved_paid"):

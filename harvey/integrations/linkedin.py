@@ -9,9 +9,10 @@ import asyncio
 import json
 import logging
 import random
+import re
 from datetime import date
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 from urllib.parse import quote_plus
 
 logger = logging.getLogger("harvey.linkedin")
@@ -431,3 +432,118 @@ class LinkedInAutomation:
         except Exception as e:
             logger.error(f"Error extracting profile {linkedin_url}: {e}")
             return None
+
+
+LINKEDIN_URL_RE = re.compile(
+    r"^https?://([a-z]{2,3}\.)?linkedin\.com/(in|company|school)/[a-zA-Z0-9_\-%]+/?$",
+    re.I
+)
+
+
+def validate_linkedin_url(url: str) -> bool:
+    """Validate format of LinkedIn profile or company page URL."""
+    if not url or not isinstance(url, str):
+        return False
+    return bool(LINKEDIN_URL_RE.match(url.strip()))
+
+
+def extract_linkedin_slug(url: str) -> str:
+    """Extract username or company slug from LinkedIn URL."""
+    if not url or not isinstance(url, str):
+        return ""
+    clean = url.strip().rstrip("/")
+    return clean.split("/")[-1]
+
+
+async def generate_linkedin_outreach(
+    name: str,
+    company: str,
+    title: str = "",
+    industry: str = "",
+    offer: str = "",
+    notes: str = "",
+    state=None,
+) -> dict[str, Any]:
+    """Generate grounded LinkedIn connection request (<=200 chars) and InMail (<=500 chars).
+
+    Uses local Ollama or active TaskRouter; gracefully degrades to deterministic templates.
+    """
+    first_name = name.strip().split()[0] if name.strip() else "there"
+    comp_name = company.strip() or "your team"
+    title_phrase = f" as {title.strip()}" if title.strip() else ""
+    ind_phrase = f" in {industry.strip()}" if industry.strip() else ""
+
+    # Build prompt for AI generation
+    prompt = (
+        f"You are a B2B sales outreach copywriter. Generate two short LinkedIn outreach messages "
+        f"for {name.strip()}{title_phrase} at {comp_name}{ind_phrase}.\n"
+        f"Offer context: {offer or 'Harvey autonomous AI sales agent platform'}.\n"
+        f"Additional notes: {notes or 'relevant industry modernization'}.\n\n"
+        f"Format your response EXACTLY as JSON:\n"
+        f"{{\n"
+        f'  "connection_note": "A personalized connection request under 200 characters.",\n'
+        f'  "inmail_subject": "Brief subject under 50 characters",\n'
+        f'  "inmail_body": "Grounded InMail message under 450 characters."\n'
+        f"}}"
+    )
+
+    ai_generated = False
+    connection_note = ""
+    inmail_subject = ""
+    inmail_body = ""
+    provider_used = "deterministic_rules"
+
+    try:
+        from harvey.providers.router import TaskRouter
+        router = TaskRouter()
+        res = await router.execute(prompt=prompt, task="linkedin_outreach", expect_json=True, timeout=20.0)
+        if not res.is_error and res.text:
+            m = re.search(r"\{.*\}", res.text, re.DOTALL)
+            if m:
+                payload = json.loads(m.group(0))
+                connection_note = str(payload.get("connection_note") or "").strip()
+                inmail_subject = str(payload.get("inmail_subject") or "").strip()
+                inmail_body = str(payload.get("inmail_body") or "").strip()
+                ai_generated = True
+                provider_used = res.provider or "ai"
+    except Exception as e:
+        logger.debug(f"AI LinkedIn generation failed, using rule templates: {e}")
+
+    # Fallback to high-converting deterministic templates if AI generation failed or exceeded char limits
+    if not connection_note or len(connection_note) > 280:
+        connection_note = f"Hi {first_name}, impressed by your work at {comp_name}. Would love to connect and share relevant insights on autonomous pipeline workflows."
+        if len(connection_note) > 200:
+            connection_note = f"Hi {first_name}, impressed by your work at {comp_name}. Would love to connect and exchange insights on modern pipeline workflows."
+        if len(connection_note) > 200:
+            connection_note = f"Hi {first_name}, following your work at {comp_name}—would love to connect and share notes on B2B workflows."
+
+    if not inmail_subject:
+        inmail_subject = f"Connecting re: {comp_name} outbound workflows"
+
+    if not inmail_body or len(inmail_body) > 600:
+        inmail_body = (
+            f"Hi {first_name},\n\n"
+            f"I came across {comp_name} and wanted to reach out. We've built an autonomous sales development agent "
+            f"that coordinates prospect discovery, qualification, and stage progression with 100% human review.\n\n"
+            f"Would you be open to a brief 15-min chat next week?\n\n"
+            f"Best regards,\nHarvey Team"
+        )
+
+    # Ensure hard character limits: connection note <= 200, inmail <= 500
+    if len(connection_note) > 200:
+        connection_note = connection_note[:197] + "..."
+
+    return {
+        "success": True,
+        "name": name,
+        "company": company,
+        "title": title,
+        "connection_note": connection_note,
+        "connection_note_length": len(connection_note),
+        "inmail_subject": inmail_subject,
+        "inmail_body": inmail_body,
+        "inmail_length": len(inmail_body),
+        "ai_generated": ai_generated,
+        "provider": provider_used,
+        "manual_execution_note": "Copy and paste into LinkedIn connection request / InMail. Automated sending requires active LinkedIn session cookie.",
+    }

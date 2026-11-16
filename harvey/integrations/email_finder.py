@@ -78,6 +78,11 @@ class EmailResult:
     status: str          # verified / risky / guess / invalid
     pattern: str = ""
     mx_type: str = ""
+    confidence: float = 0.0
+    label: str = ""      # pattern_inferred / mx_valid / deliverable / role_based / disposable / syntax_invalid
+    is_disposable: bool = False
+    is_role: bool = False
+    syntax_valid: bool = True
 
     @property
     def verified(self) -> bool:
@@ -87,6 +92,54 @@ class EmailResult:
     def sendable(self) -> bool:
         """Safe to send cold: confirmed mailbox only (risky is opt-in elsewhere)."""
         return self.status == "verified"
+
+
+# RFC 5322 compliant regex for structural email syntax validation
+RFC_5322_EMAIL_RE = re.compile(
+    r"^[a-zA-Z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(?:\.[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)+$"
+)
+
+
+def validate_email_syntax(email: str) -> bool:
+    """Validate email against RFC 5322 syntax specifications."""
+    if not email or len(email) > 254 or "@" not in email:
+        return False
+    local, _, domain = email.partition("@")
+    if not local or not domain or len(local) > 64 or len(domain) > 253:
+        return False
+    return bool(RFC_5322_EMAIL_RE.match(email.strip()))
+
+
+# Open blocklist of disposable / temporary email providers
+DISPOSABLE_DOMAINS = frozenset("""
+mailinator.com guerrillamail.com tempmail.com 10minutemail.com throwawaymail.com
+yopmail.com trashmail.com sharklasers.com getairmail.com fakeinbox.com
+dispostable.com temp-mail.org tempmail.org tempmail.net binkmail.com bobmail.info
+chacuo.net devnullmail.com discard.email discardmail.com dropmail.me
+fakemailgenerator.com fastmail.fm getnada.com generator.email
+inboxkitten.com burnermail.io mohmal.com mytrashmail.com nada.ltd
+mytemp.email tempail.com templemail.com throwawayemail.com trashmail.net
+trashmail.org trash-mail.com mailexpire.com maildrop.cc mailnesia.com
+tempmailaddress.com crazymailing.com disbox.org disbox.net emailondeck.com
+spambog.com spamevader.com spamfree24.org tempemail.net tmailor.com
+wuzupmail.net zillamail.com armyspy.com cuvox.de dayrep.com
+einrot.com fleckens.hu gustr.com jourrapide.com rhyta.com
+superrito.com teleworm.us tempinbox.com mailforspam.com
+""".split())
+
+
+def is_disposable_domain(domain: str) -> bool:
+    """Check if domain is a known temporary or disposable email service."""
+    clean = _clean_domain(domain)
+    return clean in DISPOSABLE_DOMAINS or any(clean.endswith("." + d) for d in DISPOSABLE_DOMAINS)
+
+
+def is_role_email(email: str) -> bool:
+    """Check if address is a role-based mailbox (info@, sales@, etc.)."""
+    if not email or "@" not in email:
+        return False
+    local = email.split("@", 1)[0].lower().strip()
+    return local in ROLE_LOCALS
 
 
 def _clean_domain(domain: str) -> str:
@@ -764,13 +817,24 @@ async def find_email(
     """
     domain = _clean_domain(domain)
     if not (first_name and last_name and domain):
-        return EmailResult(email="", status="invalid")
+        return EmailResult(email="", status="invalid", label="syntax_invalid", syntax_valid=False)
+
+    if is_disposable_domain(domain):
+        guess = build_email(DEFAULT_PATTERN, first_name, last_name, domain)
+        return EmailResult(
+            email=guess,
+            status="invalid",
+            label="disposable",
+            is_disposable=True,
+            confidence=0.0,
+            mx_type="none",
+        )
 
     mx_host = await get_mx_host(domain)
     if not mx_host:
         # No MX → cannot receive mail at all.
         guess = build_email(DEFAULT_PATTERN, first_name, last_name, domain)
-        return EmailResult(email=guess, status="invalid", mx_type="none")
+        return EmailResult(email=guess, status="invalid", label="mx_invalid", confidence=0.0, mx_type="none")
 
     mx_type = classify_mx(mx_host)
 
@@ -789,7 +853,7 @@ async def find_email(
                                 other_people, known_emails):
         logger.info(f"Email for {first_name} {last_name}@{domain}: {candidate} could be "
                     "another named person's mailbox; not guessed")
-        return EmailResult(email="", status="guess", pattern=pattern, mx_type=mx_type)
+        return EmailResult(email="", status="guess", label="ambiguous_mailbox", pattern=pattern, mx_type=mx_type)
     if not candidate:
         candidate = build_email(DEFAULT_PATTERN, first_name, last_name, domain)
         pattern = DEFAULT_PATTERN
@@ -803,8 +867,22 @@ async def find_email(
         except Exception as e:
             logger.debug(f"Pattern cache write failed for {domain}: {e}")
 
+    syntax_ok = validate_email_syntax(candidate)
+    role_email = is_role_email(candidate)
+
     if not verify:
-        return EmailResult(email=candidate, status="guess", pattern=pattern, mx_type=mx_type)
+        lbl = "role_based" if role_email else ("pattern_inferred" if source not in DEFAULT_SOURCES else "mx_valid")
+        conf = 0.35 if role_email else (confidence if source not in DEFAULT_SOURCES else 0.45)
+        return EmailResult(
+            email=candidate,
+            status="guess",
+            pattern=pattern,
+            mx_type=mx_type,
+            confidence=conf,
+            label=lbl,
+            is_role=role_email,
+            syntax_valid=syntax_ok,
+        )
 
     status, catch_all = await _verify_candidate(candidate, mx_type, env)
 
@@ -818,5 +896,34 @@ async def find_email(
         # Verification couldn't decide — an honest guess, never "verified".
         status = "guess"
 
-    logger.info(f"Email for {first_name} {last_name}@{domain}: {candidate} [{status}]")
-    return EmailResult(email=candidate, status=status, pattern=pattern, mx_type=mx_type)
+    if status == "verified":
+        label = "deliverable"
+        final_confidence = 0.95
+    elif status == "risky":
+        label = "catch_all" if catch_all else "risky"
+        final_confidence = 0.50
+    elif status == "invalid":
+        label = "invalid"
+        final_confidence = 0.0
+    else:
+        if role_email:
+            label = "role_based"
+            final_confidence = 0.35
+        elif source not in DEFAULT_SOURCES:
+            label = "pattern_inferred"
+            final_confidence = round(confidence * 0.85, 2)
+        else:
+            label = "mx_valid"
+            final_confidence = 0.45
+
+    logger.info(f"Email for {first_name} {last_name}@{domain}: {candidate} [{status}] ({label}, conf={final_confidence})")
+    return EmailResult(
+        email=candidate,
+        status=status,
+        pattern=pattern,
+        mx_type=mx_type,
+        confidence=final_confidence,
+        label=label,
+        is_role=role_email,
+        syntax_valid=syntax_ok,
+    )

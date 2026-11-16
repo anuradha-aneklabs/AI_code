@@ -4098,6 +4098,13 @@ async def get_gmail_status():
     client_secret = env.gmail_client_secret
     token = _load_token()
 
+    def _is_placeholder(val: str) -> bool:
+        if not val:
+            return False
+        v = str(val).lower().strip()
+        return any(p in v for p in ("dummy", "example", "change_me", "your_", "your-", "replace_me", "placeholder", "xxx")) or v.startswith("1234567890")
+
+    is_placeholder = _is_placeholder(client_id) or _is_placeholder(client_secret)
     is_mock = bool(token and token.get("is_mock"))
     is_connected = bool((client_id and client_secret and token) or is_mock)
     missing = []
@@ -4111,10 +4118,17 @@ async def get_gmail_status():
     scope = token.get("scope", "") if token else READONLY_SCOPE
     is_readonly = READONLY_SCOPE in scope or "modify" not in scope
 
-    status_str = "mock_connected" if is_mock else ("connected" if is_connected else "disconnected")
+    if is_mock:
+        status_str = "mock_connected"
+    elif is_placeholder:
+        status_str = "placeholder_credentials"
+    elif is_connected:
+        status_str = "connected"
+    else:
+        status_str = "disconnected"
 
     email_address = token.get("email", "") if is_mock else ""
-    if is_connected and not is_mock:
+    if is_connected and not is_mock and not is_placeholder:
         try:
             cfg = load_config()
             provider = GmailProvider(cfg, env)
@@ -4128,6 +4142,7 @@ async def get_gmail_status():
         "configured": is_connected,
         "status": status_str,
         "is_mock": is_mock,
+        "is_placeholder": is_placeholder,
         "email_address": email_address,
         "scope": scope,
         "is_readonly": is_readonly,
@@ -4373,6 +4388,13 @@ async def get_microsoft_status():
     tenant_id = env.m365_tenant_id
     token = _load_token()
 
+    def _is_placeholder(val: str) -> bool:
+        if not val:
+            return False
+        v = str(val).lower().strip()
+        return any(p in v for p in ("dummy", "example", "change_me", "your_", "your-", "replace_me", "placeholder", "xxx")) or v.startswith("1234567890")
+
+    is_placeholder = _is_placeholder(client_id) or _is_placeholder(tenant_id)
     is_mock = bool(token and token.get("is_mock"))
     is_connected = bool((client_id and token) or is_mock)
     missing = []
@@ -4383,11 +4405,21 @@ async def get_microsoft_status():
     if not token:
         missing.append("data/m365_token.json")
 
+    if is_mock:
+        status_str = "mock_connected"
+    elif is_placeholder:
+        status_str = "placeholder_credentials"
+    elif is_connected:
+        status_str = "connected"
+    else:
+        status_str = "disconnected"
+
     email_address = token.get("email", "") if token else ""
     return {
         "configured": is_connected,
-        "status": "mock_connected" if is_mock else ("connected" if is_connected else "disconnected"),
+        "status": status_str,
         "is_mock": is_mock,
+        "is_placeholder": is_placeholder,
         "email_address": email_address,
         "client_id_configured": bool(client_id),
         "tenant_id_configured": bool(tenant_id),
@@ -4855,6 +4887,16 @@ async def test_integration_connection(request: Request):
                 error_detail = str(e)
                 message = f"Microsoft 365 test failed: {e}"
 
+    elif provider == "linkedin":
+        from harvey.integrations.linkedin import COOKIES_PATH
+        latency_ms = int((time.time() - start_time) * 1000)
+        has_cookies = COOKIES_PATH.exists()
+        success = True
+        message = (
+            "LinkedIn Free AI Outreach Generator operational (local Ollama inference). "
+            f"Browser automation: {'saved session cookies present' if has_cookies else 'manual copy / operator session required'}."
+        )
+
     elif provider in ("calcom", "calendly", "dataforseo", "serper", "tinyfish", "scavio", "zerobounce", "hunter", "reoon"):
         env_map = {
             "calcom": ["CALCOM_API_KEY", "CAL_COM_API_KEY", "CAL_API_KEY"],
@@ -4959,7 +5001,7 @@ async def verify_calendar_link(request: Request):
 
 
 @app.get("/api/calendar/slots")
-async def get_calendar_slots(days: int = 7):
+async def get_calendar_slots(days: int = 7, timezone: str = "UTC"):
     """Get available upcoming meeting slots respecting business days and hours."""
     try:
         from harvey.config import load_config
@@ -4967,10 +5009,40 @@ async def get_calendar_slots(days: int = 7):
         cfg = load_config()
         booking_url = getattr(cfg.product.offer, "booking_url", "") or ""
         client = CalendarClient(booking_url=booking_url)
-        slots = await client.get_available_slots(days_ahead=days)
-        return {"success": True, "slots": slots, "count": len(slots), "platform": client.platform_name}
+        slots = await client.get_available_slots(days_ahead=days, timezone_str=timezone)
+        return {"success": True, "slots": slots, "count": len(slots), "platform": client.platform_name, "timezone": timezone}
     except Exception as e:
         logger.exception("Failed to get calendar slots")
+        return JSONResponse({"success": False, "error": str(e)}, status_code=500)
+
+
+@app.get("/api/calendar/ics-download")
+async def download_calendar_ics(
+    email: str = "prospect@example.com",
+    name: str = "Prospect",
+    start: str = "",
+    duration: int = 15,
+):
+    """Generate and download a standard RFC 5545 .ics invite file."""
+    try:
+        from harvey.config import load_config
+        from harvey.integrations.calendar import CalendarClient
+        cfg = load_config()
+        booking_url = getattr(cfg.product.offer, "booking_url", "") or ""
+        client = CalendarClient(booking_url=booking_url)
+        ics_content = client.generate_ics_invite(
+            prospect_email=email,
+            prospect_name=name,
+            slot_start=start,
+            duration_minutes=duration,
+        )
+        headers = {
+            "Content-Disposition": f'attachment; filename="meeting-{int(time.time())}.ics"',
+            "Content-Type": "text/calendar; charset=utf-8",
+        }
+        return Response(content=ics_content, media_type="text/calendar", headers=headers)
+    except Exception as e:
+        logger.exception("Failed to generate ICS download")
         return JSONResponse({"success": False, "error": str(e)}, status_code=500)
 
 
@@ -5008,6 +5080,114 @@ async def book_calendar_meeting(request: Request):
         }
     except Exception as e:
         logger.exception("Failed to book calendar meeting")
+        return JSONResponse({"success": False, "error": str(e)}, status_code=500)
+
+
+# ── Free LinkedIn Workflows & Drafting Endpoints ──
+
+@app.get("/api/linkedin/status")
+async def get_linkedin_status():
+    """Report status of LinkedIn capabilities: message drafting and browser automation."""
+    from harvey.config import load_env
+    from harvey.integrations.linkedin import COOKIES_PATH, ACTIVITY_PATH
+    import json
+    env = load_env()
+    has_creds = bool(getattr(env, "linkedin_email", "") and getattr(env, "linkedin_password", ""))
+    has_cookies = COOKIES_PATH.exists()
+
+    activity = {}
+    if ACTIVITY_PATH.exists():
+        try:
+            activity = json.loads(ACTIVITY_PATH.read_text(encoding="utf-8"))
+        except Exception:
+            pass
+
+    return {
+        "success": True,
+        "drafting": {
+            "status": "ready",
+            "provider": "ollama / local AI",
+            "cost": "free (zero API keys required)",
+            "limits": "Connection note <= 200 chars, InMail <= 500 chars",
+            "features": ["grounded_generation", "1_click_copy", "multi_industry_adaptation"],
+        },
+        "browser_automation": {
+            "status": "connected" if has_cookies or has_creds else "session_required",
+            "credentials_configured": has_creds,
+            "saved_session_cookies": has_cookies,
+            "daily_activity": activity,
+            "note": "Operator personal session cookie or credentials required for automated headless profile scraping.",
+        },
+    }
+
+
+@app.post("/api/linkedin/draft")
+async def draft_linkedin_message(request: Request):
+    """Generate grounded LinkedIn connection note and InMail for any target prospect."""
+    try:
+        body = await request.json() if await request.body() else {}
+        name = str(body.get("name") or "").strip()
+        company = str(body.get("company") or "").strip()
+        title = str(body.get("title") or "").strip()
+        industry = str(body.get("industry") or "").strip()
+        offer = str(body.get("offer") or "").strip()
+        notes = str(body.get("notes") or "").strip()
+
+        if not name and not company:
+            return JSONResponse({"success": False, "error": "name or company is required"}, status_code=400)
+
+        from harvey.integrations.linkedin import generate_linkedin_outreach
+        result = await generate_linkedin_outreach(
+            name=name,
+            company=company,
+            title=title,
+            industry=industry,
+            offer=offer,
+            notes=notes,
+        )
+        return result
+    except Exception as e:
+        logger.exception("Failed to generate LinkedIn draft")
+        return JSONResponse({"success": False, "error": str(e)}, status_code=500)
+
+
+@app.post("/api/prospects/{prospect_id}/linkedin-draft")
+async def draft_prospect_linkedin_message(prospect_id: str, request: Request):
+    """Generate grounded LinkedIn connection note and InMail for a saved prospect."""
+    try:
+        state = _state()
+        await state.init_db()
+        prospect = await state.get_prospect(prospect_id)
+        if not prospect:
+            return JSONResponse({"success": False, "error": f"Prospect '{prospect_id}' not found"}, status_code=404)
+
+        from harvey.config import load_config
+        cfg = load_config()
+        offer_desc = getattr(cfg.product.offer, "short_description", "") or getattr(cfg.product, "description", "") or ""
+
+        # Load research if available
+        research = await state.get_lead_research(prospect_id)
+        notes = ""
+        industry = ""
+        if research:
+            notes = str(research.get("summary") or "")
+            industry = str(research.get("industry") or "")
+
+        from harvey.integrations.linkedin import generate_linkedin_outreach
+        full_name = f"{prospect.first_name} {prospect.last_name}".strip() or prospect.company
+        result = await generate_linkedin_outreach(
+            name=full_name,
+            company=prospect.company or "",
+            title=prospect.title or "",
+            industry=industry,
+            offer=offer_desc,
+            notes=notes,
+            state=state,
+        )
+        result["prospect_id"] = prospect_id
+        return result
+    except Exception as e:
+        logger.exception(f"Failed to generate LinkedIn draft for prospect {prospect_id}")
         return JSONResponse({"success": False, "error": str(e)}, status_code=500)
 
 

@@ -282,6 +282,23 @@ class CalendarClient:
             "timezone": self.default_timezone,
         }
 
+    @staticmethod
+    def generate_direct_booking_link(username: str, platform: str = "cal.com", slug: str = "", duration: int = 15) -> str:
+        """Construct a clean, valid booking URL for Cal.com, Calendly, or custom schedulers."""
+        clean_user = (username or "").strip().strip("/")
+        clean_slug = (slug or "").strip().strip("/") or f"{duration}min"
+        p = platform.lower()
+        if "calendly" in p:
+            return f"https://calendly.com/{clean_user}/{clean_slug}"
+        elif "google" in p:
+            return f"https://calendar.google.com/calendar/appointments/schedules/{clean_user}"
+        elif "hubspot" in p:
+            return f"https://meetings.hubspot.com/{clean_user}"
+        elif "tidycal" in p:
+            return f"https://tidycal.com/{clean_user}/{clean_slug}"
+        else:  # Cal.com default
+            return f"https://cal.com/{clean_user}/{clean_slug}"
+
     async def get_available_slots(
         self,
         date_range: str = "7d",
@@ -291,10 +308,17 @@ class CalendarClient:
         """Return available meeting slots for the given window.
 
         If an external API is connected, queries it. Otherwise, computes
-        valid business hour slots (09:00 - 17:00 Mon-Fri) respecting quiet hours.
+        valid business hour slots (10:00 - 16:00 Mon-Fri) respecting quiet hours
+        and timezone conversions.
         """
         import os
+        import zoneinfo
         tz_name = timezone_str or self.default_timezone
+
+        try:
+            target_tz = zoneinfo.ZoneInfo(tz_name) if tz_name and tz_name.upper() != "UTC" else timezone.utc
+        except Exception:
+            target_tz = timezone.utc
 
         # Parse days ahead from date_range (e.g. '7d', '14d', '3d')
         if date_range and date_range.endswith("d"):
@@ -367,11 +391,18 @@ class CalendarClient:
                 )
                 end_dt = start_dt + timedelta(minutes=duration_min)
 
-                formatted_time = start_dt.strftime("%A, %b %d at %I:%M %p UTC")
+                local_start_dt = start_dt.astimezone(target_tz)
+                tz_label = local_start_dt.tzname() or tz_name
+                formatted_local = local_start_dt.strftime(f"%A, %b %d at %I:%M %p {tz_label}")
+                formatted_utc = start_dt.strftime("%A, %b %d at %I:%M %p UTC")
+
                 slots.append({
                     "start": start_dt.isoformat(),
                     "end": end_dt.isoformat(),
-                    "formatted": formatted_time,
+                    "local_start": local_start_dt.isoformat(),
+                    "formatted": formatted_local,
+                    "formatted_utc": formatted_utc,
+                    "timezone": str(tz_name),
                     "date": slot_date.isoformat(),
                     "duration_minutes": duration_min,
                     "booking_url": self.booking_url or "https://cal.com/harvey-team/15min",

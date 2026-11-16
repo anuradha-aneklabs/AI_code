@@ -63,3 +63,4 @@ def test_honest_provider_connection_reporting(api_client):
         data = resp.json()
         assert data.get("success") is False
         assert data.get("status") == "credentials_missing"
+
