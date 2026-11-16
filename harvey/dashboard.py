@@ -209,7 +209,26 @@ def _check_harvey_pid() -> int | None:
     return None
 
 
-# ── Setup Status ──
+# ── Health & Setup Status ──
+
+
+@app.get("/api/health")
+async def health_check():
+    """Lightweight operational health check for local and remote monitoring."""
+    return {
+        "status": "ok",
+        "app": "harvey",
+        "version": "2.0.0",
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+@app.get("/api/summary")
+async def get_summary():
+    """Platform state summary endpoint (API-01)."""
+    state = _state()
+    await state.init_db()
+    return await state.get_state_summary()
 
 
 @app.get("/api/setup-status")
@@ -4792,8 +4811,9 @@ async def test_integration_connection(request: Request):
             error_detail = "missing token"
         elif token.get("is_mock"):
             latency_ms = int((time.time() - start_time) * 1000)
-            success = True
-            message = f"Gmail Sandbox active (email: {token.get('email')})"
+            success = False
+            error_detail = "Offline mock token active; live Google OAuth consent required"
+            message = f"Gmail Sandbox active (offline mock token: {token.get('email')}; live Google OAuth not connected)"
         else:
             try:
                 p = GmailProvider(load_config(), load_env())
@@ -4818,8 +4838,9 @@ async def test_integration_connection(request: Request):
             error_detail = "missing token"
         elif token.get("is_mock"):
             latency_ms = int((time.time() - start_time) * 1000)
-            success = True
-            message = f"Microsoft 365 Sandbox active (email: {token.get('email')})"
+            success = False
+            error_detail = "Offline mock token active; live Microsoft 365 OAuth consent required"
+            message = f"Microsoft 365 Sandbox active (offline mock token: {token.get('email')}; live Azure OAuth not connected)"
         else:
             try:
                 p = MicrosoftProvider(load_config(), load_env())
@@ -4860,7 +4881,14 @@ async def test_integration_connection(request: Request):
         return JSONResponse({"success": False, "error": f"Unknown provider: {provider}"}, status_code=404)
 
     # Log to provider_logs and update integrations table
-    new_status = "connected" if success else ("credentials_missing" if "missing" in error_detail.lower() else "api_error")
+    if success:
+        new_status = "connected"
+    elif "sandbox" in message.lower():
+        new_status = "sandbox_active"
+    elif "missing" in error_detail.lower():
+        new_status = "credentials_missing"
+    else:
+        new_status = "api_error"
     try:
         await state.log_provider_request(
             provider=provider,

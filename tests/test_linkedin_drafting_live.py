@@ -27,3 +27,4 @@ async def test_linkedin_direct_message_generation():
     assert len(result.strip()) > 10
     # Verify the note is personalized and relevant
     assert any(term in result.lower() for term in ["connect", "engineering", "datacore", "michael", "impressed", "pleasure"])
+
