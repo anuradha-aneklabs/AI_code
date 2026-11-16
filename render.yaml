@@ -1,0 +1,28 @@
+services:
+  - type: web
+    name: harvey-ai-sales-agent
+    runtime: python
+    region: oregon
+    plan: standard
+    buildCommand: "pip install --no-cache-dir -r requirements.txt && playwright install --with-deps chromium"
+    startCommand: "python -m harvey dashboard --host 0.0.0.0 --port $PORT"
+    healthCheckPath: "/api/harvey/status"
+    disk:
+      name: harvey-data
+      mountPath: /app/data
+      sizeGB: 10
+    envVars:
+      - key: PYTHONUNBUFFERED
+        value: "1"
+      - key: HARVEY_ALLOW_REMOTE_BIND
+        value: "1"
+      - key: HARVEY_ALLOWED_HOSTS
+        value: "*.onrender.com,localhost,127.0.0.1"
+      - key: BRAIN_PROVIDER
+        value: "gemini"
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: REQUIRE_APPROVAL
+        value: "true"
+      - key: LIVE_SENDING_ENABLED
+        value: "false"

@@ -13,12 +13,17 @@ services:
     init: true
     ports:
       # Expose only on loopback for security (use reverse proxy or SSH tunnel for remote access)
-      - "127.0.0.1:5555:5555"
+      - "${HARVEY_BIND_IP:-127.0.0.1}:${HARVEY_PORT:-5555}:5555"
     environment:
       - PYTHONUNBUFFERED=1
+      - HARVEY_ALLOW_REMOTE_BIND=${HARVEY_ALLOW_REMOTE_BIND:-0}
+      - HARVEY_ALLOWED_HOSTS=${HARVEY_ALLOWED_HOSTS:-localhost,127.0.0.1}
+      - BRAIN_PROVIDER=${BRAIN_PROVIDER:-ollama}
       - OLLAMA_BASE_URL=${OLLAMA_BASE_URL:-http://host.docker.internal:11434}
+      - REQUIRE_APPROVAL=${REQUIRE_APPROVAL:-true}
+      - LIVE_SENDING_ENABLED=${LIVE_SENDING_ENABLED:-false}
     volumes:
-      # Persistent application data and database
+      # Persistent application data, SQLite database, and ChromaDB vector store
       - harvey_data:/app/data
       # Mount configuration
       - ./harvey.yaml:/app/harvey.yaml:ro
@@ -37,7 +42,26 @@ services:
         max-size: "20m"
         max-file: "5"
 
+  # Optional companion Ollama container for standalone Linux deployments
+  # Run with: docker compose -f docker-compose.prod.yml --profile with-ollama up -d
+  ollama:
+    image: ollama/ollama:latest
+    container_name: harvey-ollama
+    restart: unless-stopped
+    profiles: ["with-ollama"]
+    ports:
+      - "127.0.0.1:11434:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:11434/api/tags"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+
 volumes:
   harvey_data:
     driver: local
-
+  ollama_data:
+    driver: local

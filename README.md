@@ -1,10 +1,10 @@
 # Harvey
 
-**An autonomous sales agent that runs on your Claude Code or Codex subscription.**
+**A Universal Multi-Industry Autonomous AI Sales Agent Platform.**
 
-Harvey finds businesses worth selling to, learns something specific about each one, writes cold email that references it, sends it, reads the replies, and works the conversation toward a meeting. It runs on your machine, in a loop, on its own.
+Harvey finds businesses worth selling to across any industry (SaaS, Legal, Healthcare, Manufacturing, Real Estate, Finance, E-commerce, etc.), learns specific operational needs about each one, writes grounded multi-step cold email campaigns, and manages the pipeline through a human-in-the-loop review gate.
 
-The unusual part: **there is no model API bill.** Harvey uses your Claude Pro or Max subscription through Claude Code, or your ChatGPT subscription through Codex. Model calls use the plan you already pay for, without an API key or per-token API billing. Claude is the default; [Codex is an opt-in provider on macOS and Linux](#using-a-chatgpt-plan-instead-codex).
+Harvey supports both **local private inference (Ollama with `qwen2.5:1.5b` and dense embeddings with `nomic-embed-text`)** and **subscription/cloud providers (Claude Code, OpenAI Codex, Google Gemini, Groq, OpenRouter)**. All lead discovery is powered by real OpenStreetMap geospatial data with automatic Nominatim failover.
 
 ```
 $ harvey run
@@ -13,6 +13,7 @@ $ harvey run
 Harvey is online. Always Be Closing.
 ============================================================
 Checking pipeline state...
+Industry Profile: B2B SaaS & High-Growth Tech (Default)
 Decision: write_campaign (3 new prospects with no drafts)
   handler   → Elena Park, Harbor Dental Studio     interested, answer drafted
   handler   → Priya Nair, Highline Roofing         objection, answer drafted
@@ -21,22 +22,28 @@ Decision: write_campaign (3 new prospects with no drafts)
 Cycle complete. Sleeping for 15 minutes.
 ```
 
-And the dashboard it keeps, at `localhost:5555`. In this order: the Today screen, a
-conversation Harvey handed back because a prospect asked for a contract, approving
-a drafted reply from the outbox, confirming a signal, building a cohort from
-confirmed signals, searching contacts, and the same screen in dark mode:
+And the dashboard it keeps, at `http://127.0.0.1:5555/`:
 
 ![Harvey's dashboard: the Today screen, a conversation handed back for a human, approving a reply in the outbox, confirming a signal and building a cohort, searching contacts, then dark mode](docs/dashboard.gif)
 
-<sub>The demo data is invented: "Bookwell" selling online booking to roofers, dental practices and HVAC shops, on `.test` domains.</sub>
+---
+
+## Documentation Guides
+
+- [Production Deployment Guide](DEPLOYMENT_GUIDE.md) — Local, Docker Compose, Render Blueprint, Railway, and AWS ECS.
+- [Integration Setup Guide](INTEGRATION_SETUP_GUIDE.md) — Credentials and configuration for all 11 external providers.
+- [Final Handover Report](HARVEY_FINAL_HANDOVER_REPORT.md) — Comprehensive verification and acceptance sign-off.
+- [Feature Completion Matrix](HARVEY_FEATURE_COMPLETION_MATRIX.md) — Full 123-feature breakdown.
 
 ---
 
 ## Table of contents
 
+- [Universal Multi-Industry Architecture](#universal-multi-industry-architecture)
 - [Why the subscription thing matters](#why-the-subscription-thing-matters)
 - [What Harvey actually does](#what-harvey-actually-does)
 - [Quick start](#quick-start)
+- [Production Deployment](#production-deployment)
 - [You confirm what it looks for](#you-confirm-what-it-looks-for)
 - [The prospecting pipeline](#the-prospecting-pipeline)
 - [The skills library](#the-skills-library)
@@ -48,6 +55,21 @@ confirmed signals, searching contacts, and the same screen in dark mode:
 - [Using a ChatGPT plan instead (Codex)](#using-a-chatgpt-plan-instead-codex)
 - [Legal and deliverability](#legal-and-deliverability)
 - [Troubleshooting](#troubleshooting)
+- [Project structure](#project-structure)
+- [Philosophy](#philosophy)
+- [Roadmap](#roadmap)
+
+---
+
+## Universal Multi-Industry Architecture
+
+Harvey is a **Universal Multi-Industry AI Sales Platform**. It is not restricted to any single domain:
+
+- **Default Profile:** B2B SaaS & High-Growth Tech (`prof_saas_global`).
+- **20 Pre-Configured Verticals:** IT & SaaS, Legal Services, Healthcare & Clinics, Real Estate, Manufacturing & Industrial, Financial Services, Education & EdTech, E-Commerce & Retail, Hospitality & Tourism, Logistics & Supply Chain, Construction, Automotive, Agriculture, HR & Staffing, Marketing Agencies, Biotech & Life Sciences, Cybersecurity, Fintech & Payments, Clean Energy, and Management Consulting.
+- **Dynamic Autocomplete:** Contextual subcategory pills update automatically upon selecting an industry.
+- **Custom Profiles:** Users can create, edit, persist, and delete custom business profiles directly from the dashboard.
+- **Cross-Industry Isolation:** Proven 0-leak isolation between clinical healthcare terminology and commercial B2B profiles.
 - [Project structure](#project-structure)
 - [Philosophy](#philosophy)
 - [Roadmap](#roadmap)

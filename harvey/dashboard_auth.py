@@ -340,7 +340,15 @@ class DashboardGuard:
         # 1. Host, before anything else.
         hosts = headers.get("host", [])
         host = parse_host(hosts[0]) if len(hosts) == 1 else None
-        if host is None or not is_loopback(host):
+        allowed_hosts_env = os.environ.get("HARVEY_ALLOWED_HOSTS", "").strip()
+        allowed_hosts = [h.strip().lower() for h in allowed_hosts_env.split(",") if h.strip()] if allowed_hosts_env else []
+        is_host_allowed = (host is not None) and (
+            is_loopback(host) or
+            ("*" in allowed_hosts) or
+            (host in allowed_hosts) or
+            any(h.startswith("*.") and host.endswith(h[1:]) for h in allowed_hosts)
+        )
+        if not is_host_allowed:
             return await deny(400, "bad_host",
                               "This dashboard only answers to localhost / 127.0.0.1.")
         host_header = hosts[0].lower()
@@ -351,7 +359,7 @@ class DashboardGuard:
                       and headers.get("sec-fetch-mode", [""])[0] == "navigate"
                       and headers.get("sec-fetch-dest", [""])[0] == "document")
         origins = headers.get("origin", [])
-        if origins and (len(origins) != 1 or origins[0].lower() != f"http://{host_header}"):
+        if origins and (len(origins) != 1 or origins[0].lower() not in (f"http://{host_header}", f"https://{host_header}")):
             if not navigation:
                 return await deny(403, "cross_origin", "Cross-origin requests are refused.")
         site = headers.get("sec-fetch-site", [])
