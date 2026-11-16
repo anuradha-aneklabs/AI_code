@@ -99,3 +99,4 @@ Script: [`scratch/e2e_full_dashboard_audit.py`](file:///C:/Users/aneka/Desktop/h
    - `#settings`: Active, integration cards displayed with honest states.
    - `#help`: Active, operator documentation rendered.
 4. **Console Health:** **0 browser console errors or unhandled exceptions.**
+

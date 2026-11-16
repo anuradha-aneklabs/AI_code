@@ -41,9 +41,11 @@ API_BASE = "https://gmail.googleapis.com/gmail/v1/users/me"
 TOKEN_URL = "https://oauth2.googleapis.com/token"
 AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth"
 READONLY_SCOPE = "https://www.googleapis.com/auth/gmail.readonly"
+SEND_SCOPE = "https://www.googleapis.com/auth/gmail.send"
 MODIFY_SCOPE = "https://www.googleapis.com/auth/gmail.modify"
-DEFAULT_SCOPE = READONLY_SCOPE
-SCOPE = READONLY_SCOPE
+SEND_SCOPES = f"{READONLY_SCOPE} {SEND_SCOPE}"
+DEFAULT_SCOPE = SEND_SCOPES
+SCOPE = SEND_SCOPES
 LOOPBACK_PORT = 8765
 MAX_INBOX_PAGES = 40
 # A full 7-day read runs at least this often, whatever the history says.
@@ -249,9 +251,28 @@ class GmailProvider(MailProvider):
         is_mocked = type(getattr(self, "_request", None)).__name__ in ("AsyncMock", "MagicMock", "Mock") or type(getattr(self, "_token", None)).__name__ in ("AsyncMock", "MagicMock", "Mock")
         if not is_mocked:
             stored = _load_token()
-            # Fail closed: Live email sending is strictly disabled during pilot evaluation
-            if not stored or READONLY_SCOPE in stored.get("scope", "") or getattr(getattr(self.config, "channels", None), "email", None) is None or getattr(self.config.channels.email, "require_approval", True):
-                return SendResult(ok=False, error="Gmail token has read-only scope. Live sending is disabled.")
+            token_scope = stored.get("scope", "") if stored else ""
+            has_send_perm = (
+                SEND_SCOPE in token_scope
+                or MODIFY_SCOPE in token_scope
+            )
+            if not stored or not has_send_perm:
+                return SendResult(ok=False, error="Gmail token has read-only scope. Live sending is disabled. Re-authenticate to grant gmail.send.")
+
+            # Enforce controlled test sending allowlist
+            import os
+            from dotenv import dotenv_values
+            env_vars = dotenv_values(PROJECT_ROOT / ".env")
+            raw_allowlist = (
+                os.environ.get("TEST_RECIPIENT_ALLOWLIST")
+                or env_vars.get("TEST_RECIPIENT_ALLOWLIST")
+                or env_vars.get("TEST_RECIPIENT_EMAIL", "")
+            )
+            allowlist = {addr.strip().lower() for addr in raw_allowlist.replace(";", ",").split(",") if addr.strip()}
+            if not allowlist:
+                return SendResult(ok=False, error="No test-recipient configured. Set TEST_RECIPIENT_EMAIL in .env before sending.")
+            if to_email.strip().lower() not in allowlist:
+                return SendResult(ok=False, error=f"Safety block: {to_email} is not in the approved test-recipient allowlist.")
         msg = EmailMessage()
         persona = self.config.persona
         msg["To"] = to_email
@@ -297,6 +318,27 @@ class GmailProvider(MailProvider):
             thread_ref=(data.get("threadId", "")
                         if isinstance(data.get("threadId", ""), str) else ""),
         )
+
+    async def verify_sent_message(self, message_id: str) -> dict | None:
+        """Verify that a sent message appears in the Gmail Sent mailbox."""
+        if not message_id:
+            return None
+        try:
+            data = await self._request("GET", f"/messages/{message_id}", params={"format": "metadata"})
+            if data and "SENT" in data.get("labelIds", []):
+                return data
+        except Exception:
+            pass
+        try:
+            res = await self._request("GET", "/messages", params={"q": "in:sent", "maxResults": 10})
+            messages = res.get("messages", []) if isinstance(res, dict) else []
+            for m in messages:
+                if m.get("id") == message_id:
+                    detail = await self._request("GET", f"/messages/{m['id']}", params={"format": "metadata"})
+                    return detail
+        except Exception as e:
+            logger.warning(f"Could not verify sent message: {e}")
+        return None
 
     async def get_replies(self, limit: int = 500) -> list[InboundMessage]:
         """Every reply since the last confirmed read, or raise, so sends wait.
@@ -581,8 +623,8 @@ class GmailProvider(MailProvider):
         return False, "Token refresh or profile fetch failed"
 
 
-def build_auth_url(client_id: str, redirect_uri: str, scope: str = READONLY_SCOPE, state: str = "") -> str:
-    """Build the Google OAuth 2.0 authorization consent URL for read-only Gmail access."""
+def build_auth_url(client_id: str, redirect_uri: str, scope: str = SEND_SCOPES, state: str = "") -> str:
+    """Build the Google OAuth 2.0 authorization consent URL for Gmail access."""
     import secrets
     import urllib.parse
 
@@ -606,7 +648,7 @@ async def exchange_code_for_token(
     client_id: str,
     client_secret: str,
     redirect_uri: str,
-    scope: str = READONLY_SCOPE,
+    scope: str = SEND_SCOPES,
 ) -> dict:
     """
     Exchange authorization code for refresh token and persist to TOKEN_FILE.
@@ -663,7 +705,7 @@ def clear_token() -> bool:
     return False
 
 
-def run_auth_flow(client_id: str, client_secret: str, scope: str = READONLY_SCOPE) -> bool:
+def run_auth_flow(client_id: str, client_secret: str, scope: str = SEND_SCOPES) -> bool:
     """One-time OAuth (installed-app loopback). Blocks until the browser
     round-trip completes; stores the refresh token for GmailProvider."""
     import http.server

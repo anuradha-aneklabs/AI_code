@@ -109,3 +109,4 @@ Expected output:
 ✓ Signed in as sales@yourdomain.com
 ✓ Gmail API connection verified
 ```
+

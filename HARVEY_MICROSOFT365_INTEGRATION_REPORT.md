@@ -116,3 +116,4 @@ Expected output:
 ✓ Signed in as sales@yourdomain.com
 ✓ Microsoft Graph API connection verified
 ```
+
