@@ -1168,7 +1168,7 @@ class OpenStreetMap(DiscoveryProvider):
     # timed-out one. Every one of them is another mirror's problem to solve, so
     # walk on. A 400 (bad query) or 404 is ours and fails here and now.
     RETRY_STATUSES = frozenset({429, 500, 502, 503, 504})
-    enable_nominatim_fallback: bool = True
+    enable_nominatim_fallback: bool = False
 
     # A friendly term maps to the OSM tags that actually carry those businesses.
     TAG_MAP = {
@@ -1296,10 +1296,9 @@ class OpenStreetMap(DiscoveryProvider):
 
     async def fetch(self, client, env, query):
         if not query.coordinate:
-            if getattr(self, "enable_nominatim_fallback", True):
-                nom_results = await self._fetch_nominatim(client, query)
-                if nom_results:
-                    return nom_results
+            nom_results = await self._fetch_nominatim(client, query)
+            if nom_results:
+                return nom_results
             logger.warning("osm: no coordinate for %r — Overpass needs a "
                            "lat,lng,radius to search", query.keyword())
             return []

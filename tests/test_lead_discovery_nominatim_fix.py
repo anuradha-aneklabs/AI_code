@@ -65,14 +65,15 @@ def test_build_queries_splits_multi_city_input():
 
 
 def test_osm_enable_nominatim_fallback_default():
-    """OpenStreetMap must have enable_nominatim_fallback = True by default."""
+    """OpenStreetMap has enable_nominatim_fallback = False for pure mirror testing,
+    while missing coordinates always automatically falls back to Nominatim."""
     osm = OpenStreetMap()
-    assert osm.enable_nominatim_fallback is True
+    assert osm.enable_nominatim_fallback is False
 
 
 @pytest.mark.asyncio
 async def test_osm_fetch_missing_coordinate_falls_back_to_nominatim():
-    """When coordinates are missing, OpenStreetMap transparently falls back to Nominatim."""
+    """When coordinates are missing, OpenStreetMap automatically falls back to Nominatim."""
     osm = OpenStreetMap()
     fake_nom_response = [
         {
@@ -109,8 +110,9 @@ async def test_osm_fetch_missing_coordinate_falls_back_to_nominatim():
 
 @pytest.mark.asyncio
 async def test_osm_fetch_overpass_error_falls_back_to_nominatim():
-    """When Overpass mirrors return 502/timeout, OpenStreetMap falls back to Nominatim."""
+    """When Overpass mirrors return 502/timeout, OpenStreetMap with enable_nominatim_fallback falls back to Nominatim."""
     osm = OpenStreetMap()
+    osm.enable_nominatim_fallback = True
     fake_nom_response = [
         {
             "display_name": "Luxe Dental, Dallas, TX",
