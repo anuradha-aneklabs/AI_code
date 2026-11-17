@@ -631,7 +631,7 @@ def cmd_discover(args):
     from harvey.state import StateManager
     from harvey.config import load_config, load_env
     from harvey.collectors.discover import (
-        PROVIDERS, build_queries, preset_problem, provider_menu, run_discovery,
+        PROVIDERS, build_queries, parse_cities, preset_problem, provider_menu, run_discovery,
     )
 
     async def _discover():
@@ -678,8 +678,8 @@ def cmd_discover(args):
         state = StateManager()
         await state.init_db()
 
-        # Semicolons, not commas: "Denver, CO" is one city, not two.
-        cities = [c.strip() for c in args.city.split(";") if c.strip()] or None
+        # Parse cities whether separated by semicolons, newlines, or commas
+        cities = parse_cities(args.city) if args.city else None
         preset = getattr(args, "preset", "") or ""
         problem = preset_problem(preset, args.provider, config=config)
         if problem:

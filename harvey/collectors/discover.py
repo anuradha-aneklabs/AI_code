@@ -276,6 +276,91 @@ def is_junk(domain: str, name: str = "") -> bool:
 # <=1 req/s) and forbids bulk enumeration, so every result is cached forever in
 # the settings table: a given city is looked up once, ever.
 
+US_CA_STATES = frozenset({
+    'AL', 'AK', 'AZ', 'AR', 'CA', 'CO', 'CT', 'DE', 'FL', 'GA', 'HI', 'ID', 'IL', 'IN', 'IA',
+    'KS', 'KY', 'LA', 'ME', 'MD', 'MA', 'MI', 'MN', 'MS', 'MO', 'MT', 'NE', 'NV', 'NH', 'NJ',
+    'NM', 'NY', 'NC', 'ND', 'OH', 'OK', 'OR', 'PA', 'RI', 'SC', 'SD', 'TN', 'TX', 'UT', 'VT',
+    'VA', 'WA', 'WV', 'WI', 'WY', 'DC', 'PR', 'VI', 'GU', 'AB', 'BC', 'MB', 'NB', 'NL', 'NS',
+    'NT', 'NU', 'ON', 'PE', 'QC', 'SK', 'YT', 'NSW', 'QLD', 'SA', 'TAS', 'VIC', 'ACT',
+})
+
+US_STATE_NAMES = frozenset({
+    'alabama', 'alaska', 'arizona', 'arkansas', 'california', 'colorado', 'connecticut',
+    'delaware', 'florida', 'georgia', 'hawaii', 'idaho', 'illinois', 'indiana', 'iowa',
+    'kansas', 'kentucky', 'louisiana', 'maine', 'maryland', 'massachusetts', 'michigan',
+    'minnesota', 'mississippi', 'missouri', 'montana', 'nebraska', 'nevada', 'new hampshire',
+    'new jersey', 'new mexico', 'new york', 'north carolina', 'north dakota', 'ohio',
+    'oklahoma', 'oregon', 'pennsylvania', 'rhode island', 'south carolina', 'south dakota',
+    'tennessee', 'texas', 'utah', 'vermont', 'virginia', 'washington', 'west virginia',
+    'wisconsin', 'wyoming',
+})
+
+COUNTRIES = frozenset({
+    'usa', 'united states', 'us', 'uk', 'united kingdom', 'india', 'canada', 'australia',
+    'germany', 'france', 'spain', 'italy', 'mexico', 'brazil', 'japan',
+})
+
+
+def parse_cities(raw_input: str | list[str] | None) -> list[str]:
+    """Parse raw city input into distinct target cities/locations.
+
+    Handles:
+    - Semicolon or newline separation: "Denver, CO; Boulder, CO"
+    - Comma-separated simple cities: "Austin, Dallas, Houston"
+    - Comma-separated city+state pairs: "Austin, TX, Dallas, TX, Houston, TX"
+    - Single location with state/country: "Denver, CO", "Indore, Madhya Pradesh, India"
+    """
+    if not raw_input:
+        return []
+
+    if isinstance(raw_input, (list, tuple)):
+        items = []
+        for item in raw_input:
+            items.extend(parse_cities(item))
+        return list(dict.fromkeys(items))
+
+    raw = str(raw_input).strip()
+    if not raw:
+        return []
+
+    if ';' in raw or '\n' in raw:
+        chunks = [c.strip() for c in re.split(r'[;\n]+', raw) if c.strip()]
+        result = []
+        for c in chunks:
+            result.extend(parse_cities(c))
+        return list(dict.fromkeys(result))
+
+    if ',' not in raw:
+        return [raw]
+
+    tokens = [t.strip() for t in raw.split(',') if t.strip()]
+    if len(tokens) <= 1:
+        return tokens
+
+    if len(tokens) == 2:
+        t0, t1 = tokens[0], tokens[1]
+        if t1.upper() in US_CA_STATES or t1.lower() in US_STATE_NAMES or t1.lower() in COUNTRIES:
+            return [f"{t0}, {t1}"]
+        return [t0, t1]
+
+    has_state_codes = any(t.upper() in US_CA_STATES for t in tokens)
+    if not has_state_codes:
+        if tokens[-1].lower() in COUNTRIES and len(tokens) == 3:
+            return [", ".join(tokens)]
+        return tokens
+
+    grouped = []
+    i = 0
+    while i < len(tokens):
+        if i + 1 < len(tokens) and tokens[i + 1].upper() in US_CA_STATES:
+            grouped.append(f"{tokens[i]}, {tokens[i + 1].upper()}")
+            i += 2
+        else:
+            grouped.append(tokens[i])
+            i += 1
+    return grouped
+
+
 NOMINATIM = "https://nominatim.openstreetmap.org/search"
 GEOCODE_UA = "Harvey/0.1 (open-source sales agent; github.com/ethanplusai/harvey)"
 
@@ -1083,7 +1168,7 @@ class OpenStreetMap(DiscoveryProvider):
     # timed-out one. Every one of them is another mirror's problem to solve, so
     # walk on. A 400 (bad query) or 404 is ours and fails here and now.
     RETRY_STATUSES = frozenset({429, 500, 502, 503, 504})
-    enable_nominatim_fallback: bool = False
+    enable_nominatim_fallback: bool = True
 
     # A friendly term maps to the OSM tags that actually carry those businesses.
     TAG_MAP = {
@@ -1155,59 +1240,63 @@ class OpenStreetMap(DiscoveryProvider):
                 "User-Agent": "HarveySalesAgent/1.0 (contact: support@harvey-sales.local)",
                 "Accept-Language": "en-US,en;q=0.9",
             }
-            nom_query = f"{query.term} in {query.location}" if query.location else query.term
-            r_nom = await client.get(
-                "https://nominatim.openstreetmap.org/search",
-                params={
-                    "q": nom_query,
-                    "format": "json",
-                    "addressdetails": 1,
-                    "extratags": 1,
-                    "limit": min(query.limit, 20),
-                },
-                headers=nom_headers,
-                timeout=httpx.Timeout(15.0),
-            )
-            if r_nom.status_code == 200:
-                nom_items = r_nom.json()
-                out = []
-                for item in nom_items:
-                    disp_name = item.get("display_name") or ""
-                    first_part = disp_name.split(",")[0].strip()
-                    raw_name = item.get("name") or first_part or f"{query.term.title()} Provider"
-                    osm_type = item.get("osm_type", "node")
-                    osm_id = item.get("osm_id", "")
-                    addr_dict = item.get("address") or {}
-                    extratags = item.get("extratags") or {}
-                    site = extratags.get("website") or extratags.get("contact:website") or extratags.get("url") or ""
-                    phone = extratags.get("phone") or extratags.get("contact:phone") or ""
-                    city = addr_dict.get("city") or addr_dict.get("town") or addr_dict.get("county") or query.location
-                    state_name = addr_dict.get("state") or ""
-                    full_loc = f"{city}, {state_name}".strip(", ") if state_name else city
-                    out.append(Business(
-                        name=raw_name,
-                        domain=normalize_domain(site) if site else "",
-                        website=site,
-                        phone=phone,
-                        address=disp_name,
-                        location=full_loc,
-                        category=query.term or "business",
-                        has_website=bool(site),
-                        external_id=f"osm:{osm_type}/{osm_id}",
-                        source_url=f"https://www.openstreetmap.org/{osm_type}/{osm_id}",
-                        provider=self.key,
-                        provenance="OpenStreetMap Nominatim (Free Public Geo Directory)",
-                        source_limitation="Physical premises & registered OSM nodes; trade directory coverage may be thinner than proprietary SERP engines.",
-                    ))
-                if out:
-                    return out
+            locations = parse_cities(query.location) if query.location else [""]
+            out = []
+            for i, loc in enumerate(locations):
+                if i:
+                    await asyncio.sleep(1.1)
+                nom_query = f"{query.term} in {loc}" if loc else query.term
+                r_nom = await client.get(
+                    "https://nominatim.openstreetmap.org/search",
+                    params={
+                        "q": nom_query,
+                        "format": "json",
+                        "addressdetails": 1,
+                        "extratags": 1,
+                        "limit": min(query.limit, 20),
+                    },
+                    headers=nom_headers,
+                    timeout=httpx.Timeout(15.0),
+                )
+                if r_nom.status_code == 200:
+                    nom_items = r_nom.json()
+                    for item in nom_items:
+                        disp_name = item.get("display_name") or ""
+                        first_part = disp_name.split(",")[0].strip()
+                        raw_name = item.get("name") or first_part or f"{query.term.title()} Provider"
+                        osm_type = item.get("osm_type", "node")
+                        osm_id = item.get("osm_id", "")
+                        addr_dict = item.get("address") or {}
+                        extratags = item.get("extratags") or {}
+                        site = extratags.get("website") or extratags.get("contact:website") or extratags.get("url") or ""
+                        phone = extratags.get("phone") or extratags.get("contact:phone") or ""
+                        city = addr_dict.get("city") or addr_dict.get("town") or addr_dict.get("county") or loc
+                        state_name = addr_dict.get("state") or ""
+                        full_loc = f"{city}, {state_name}".strip(", ") if state_name else city
+                        out.append(Business(
+                            name=raw_name,
+                            domain=normalize_domain(site) if site else "",
+                            website=site,
+                            phone=phone,
+                            address=disp_name,
+                            location=full_loc,
+                            category=query.term or "business",
+                            has_website=bool(site),
+                            external_id=f"osm:{osm_type}/{osm_id}",
+                            source_url=f"https://www.openstreetmap.org/{osm_type}/{osm_id}",
+                            provider=self.key,
+                            provenance="OpenStreetMap Nominatim (Free Public Geo Directory)",
+                            source_limitation="Physical premises & registered OSM nodes; trade directory coverage may be thinner than proprietary SERP engines.",
+                        ))
+            if out:
+                return out
         except Exception as nom_err:
             logger.warning("Nominatim search failed: %s", nom_err)
         return []
 
     async def fetch(self, client, env, query):
         if not query.coordinate:
-            if getattr(self, "enable_nominatim_fallback", False):
+            if getattr(self, "enable_nominatim_fallback", True):
                 nom_results = await self._fetch_nominatim(client, query)
                 if nom_results:
                     return nom_results
@@ -1216,7 +1305,7 @@ class OpenStreetMap(DiscoveryProvider):
             return []
         tags = self._tags(query.term)
         if not tags:
-            if getattr(self, "enable_nominatim_fallback", False):
+            if getattr(self, "enable_nominatim_fallback", True):
                 nom_results = await self._fetch_nominatim(client, query)
                 if nom_results:
                     return nom_results
@@ -1756,7 +1845,8 @@ def build_queries(config, cities: list[str] | None = None,
         roles = role_keywords(icp) if any("{role}" in tpl for tpl in templates) else [""]
         terms = [tpl.format(industry=t, role=r, since=since)
                  for r in roles for t in terms for tpl in templates]
-        places = cities if cities is not None else ([""] if not spec["local"] else list(icp.geography) or [""])
+        raw_places = cities if cities is not None else ([""] if not spec["local"] else list(icp.geography) or [""])
+        places = parse_cities(raw_places) if raw_places else [""]
     else:
         # "roofing contractor" is one way to search for a roofer. Each
         # configured variant is another search in every city — ranks differ
@@ -1764,7 +1854,8 @@ def build_queries(config, cities: list[str] | None = None,
         variants = getattr(icp, "keyword_variants", {}) or {}
         terms = list(dict.fromkeys(
             v.strip() for t in terms for v in [t, *variants.get(t, [])] if v.strip()))
-        places = cities if cities is not None else list(icp.geography) or [""]
+        raw_places = cities if cities is not None else list(icp.geography) or [""]
+        places = parse_cities(raw_places) if raw_places else [""]
     coords = getattr(icp, "geo_coordinates", {}) or {}
 
     return [

@@ -1803,9 +1803,9 @@ function discoverBody() {
 
     provider: _provider,
 
-    // Semicolons or newlines, never commas: "Denver, CO" is one city.
+    // Semicolons, newlines, or commas handled intelligently by backend
 
-    cities: raw ? raw.split(/[;\n]/).map(c => c.trim()).filter(Boolean) : [],
+    cities: raw ? [raw] : [],
 
     depth: Number(document.getElementById('disc-depth').value) || 30,
 
@@ -2049,7 +2049,7 @@ function renderDiscoverResult(report, running) {
 
       stat('Filtered as junk', report.junk || 0) +
 
-      (report.profiled_companies ? stat('Websites read', report.profiled_companies) : '') +
+      (report.profiled_companies ? stat(report.new_companies ? 'Websites read' : 'Backlog sites read', report.profiled_companies) : '') +
 
       stat('Actual cost', report.actual_cost ? '$' + report.actual_cost.toFixed(4) : 'free') +
 

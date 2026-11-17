@@ -2155,13 +2155,14 @@ _discovery_kind = "discover"   # or "profile": reading sites has no stop switch
 
 
 def _discovery_queries(body: dict, config):
-    from harvey.collectors.discover import build_queries, preset_problem
+    from harvey.collectors.discover import build_queries, preset_problem, parse_cities
 
     preset = str(body.get("preset") or "")
     problem = preset_problem(preset, str(body.get("provider") or ""), config=config)
     if problem:
         raise ValueError(problem)
-    cities = [c.strip() for c in (body.get("cities") or []) if c.strip()] or None
+    raw_cities = [c.strip() for c in (body.get("cities") or []) if c.strip()]
+    cities = parse_cities(raw_cities) or None
     return build_queries(
         config, cities=cities,
         depth=int(body.get("depth") or 30),
@@ -2277,7 +2278,7 @@ async def start_discovery(request: Request):
                 try:
                     await state.save_discovery_run({
                         "provider": provider,
-                        "geography": ", ".join(body.get("cities") or ["Indore, India"]),
+                        "geography": ", ".join(parse_cities(body.get("cities") or []) or ["Indore, India"]),
                         "industry": body.get("industry") or (config.icp.industries[0] if getattr(config.icp, "industries", None) else "IT, Software, SaaS and AI"),
                         "keywords": ", ".join(q.keyword() for q in queries),
                         "total_found": (result.discover or {}).get("found", 0),
