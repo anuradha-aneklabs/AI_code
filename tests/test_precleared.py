@@ -832,11 +832,11 @@ async def test_key_out_of_checks_without_a_usable_link_falls_back_to_the_buy_pag
 
 @pytest.mark.asyncio
 async def test_checkout_link_never_carries_the_api_key_into_the_reason(state):
-    client = PreclearedClient("GB", api_key="pc_live_secret123", transport=mock_status(402, {
-        "buy_url": "https://precleared.dev/buy?key=pc_live_secret123",
+    client = PreclearedClient("GB", api_key="pc_test_placeholder", transport=mock_status(402, {
+        "buy_url": "https://precleared.dev/buy?key=pc_test_placeholder",
     }))
 
     result = await client.clear("person@example.com", state)
 
     assert result.held
-    assert "pc_live_secret123" not in result.reason
+    assert "pc_test_placeholder" not in result.reason

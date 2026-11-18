@@ -60,13 +60,25 @@ async def lifespan(app: FastAPI):
         await state.init_db()
     except Exception as e:
         logger.error(f"Dashboard startup DB initialization error: {e}")
+    # Auto-start Harvey engine if configured via HARVEY_AUTOSTART_ENGINE
+    if os.environ.get("HARVEY_AUTOSTART_ENGINE", "").lower() in ("true", "1", "yes") or \
+       os.environ.get("HARVEY_AUTO_START_ENGINE", "").lower() in ("true", "1", "yes"):
+        if not _check_harvey_pid():
+            try:
+                from harvey.main import _needs_setup
+                if not _needs_setup():
+                    res = await start_harvey()
+                    logger.info("Lifespan: Harvey engine auto-started: %s", res)
+            except Exception as e:
+                logger.warning("Lifespan: Could not auto-start Harvey engine: %s", e)
     yield
     global _harvey_process
     if _harvey_process and _harvey_process.poll() is None:
-        try:
-            _harvey_process.terminate()
-        except Exception:
-            pass
+        if os.environ.get("HARVEY_KEEP_ENGINE_ON_RESTART", "").lower() not in ("true", "1", "yes"):
+            try:
+                _harvey_process.terminate()
+            except Exception:
+                pass
 
 
 # No /docs, /redoc or /openapi.json: the API is for this UI only, and every
@@ -768,11 +780,16 @@ async def start_harvey():
     if not shutil.which("claude") and local_bin.is_dir():
         env["PATH"] = str(local_bin) + os.pathsep + env.get("PATH", "")
 
+    py_exe = sys.executable
+    venv_py = PROJECT_ROOT / ".venv" / "Scripts" / "python.exe"
+    if venv_py.is_file():
+        py_exe = str(venv_py)
+
     try:
         log_handle = open(LOG_FILE, "a", encoding="utf-8")
         try:
             _harvey_process = subprocess.Popen(
-                [sys.executable, "-m", "harvey", "run"],
+                [py_exe, "-m", "harvey", "run"],
                 cwd=str(PROJECT_ROOT),
                 stdin=subprocess.DEVNULL,
                 stdout=log_handle,
@@ -1551,7 +1568,7 @@ async def outbox_reject(item_id: str, request: Request = None):
         item = await state.get_outbox_item(item_id)
         if not await state.reject_outbox_item(item_id):
             return _refuse("That email is already sending or sent, so it can't be rejected.")
-        
+
         if feedback:
             await state.add_feedback(
                 entity_type="outbox_draft",
@@ -2236,7 +2253,7 @@ async def start_discovery(request: Request):
         return JSONResponse({"success": False, "message": "a run is already going"},
                             status_code=409)
     try:
-        from harvey.collectors.discover import PROVIDERS
+        from harvey.collectors.discover import PROVIDERS, parse_cities
         from harvey.config import load_config
         from harvey.pipeline import run_prospecting
 
@@ -4788,8 +4805,13 @@ async def test_integration_connection(request: Request):
     if provider in ("openstreetmap", "nominatim"):
         display_name = "Nominatim" if provider == "nominatim" else "OpenStreetMap / Nominatim"
         try:
+            from harvey.collectors.discover import get_nominatim_user_agent, wait_for_nominatim_rate_limit
+            await wait_for_nominatim_rate_limit()
             async with httpx.AsyncClient(timeout=8.0) as client:
-                r = await client.get("https://nominatim.openstreetmap.org/status.php", headers={"User-Agent": "Harvey-SalesAgent/1.0"})
+                r = await client.get(
+                    "https://nominatim.openstreetmap.org/status.php",
+                    headers={"User-Agent": get_nominatim_user_agent()}
+                )
                 latency_ms = int((time.time() - start_time) * 1000)
                 if r.status_code == 200:
                     success = True

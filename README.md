@@ -30,10 +30,12 @@ And the dashboard it keeps, at `http://127.0.0.1:5555/`:
 
 ## Documentation Guides
 
-- [Production Deployment Guide](DEPLOYMENT_GUIDE.md) — Local, Docker Compose, Render Blueprint, Railway, and AWS ECS.
-- [Integration Setup Guide](INTEGRATION_SETUP_GUIDE.md) — Credentials and configuration for all 11 external providers.
-- [Final Handover Report](HARVEY_FINAL_HANDOVER_REPORT.md) — Comprehensive verification and acceptance sign-off.
-- [Feature Completion Matrix](HARVEY_FEATURE_COMPLETION_MATRIX.md) — Full 123-feature breakdown.
+- [Production Deployment Guide](DEPLOYMENT_GUIDE.md) — Complete production deployment instructions for Aneka Labs (Docker Compose, Linux VPS, Nginx SSL, backups, troubleshooting).
+- [Domain & DNS Handoff Guide](DOMAIN_DNS_HANDOFF.md) — Subdomain routing specifications for Jitesh Sir (`harvey.anekalabs.com`, `api.harvey.anekalabs.com`, `docs.harvey.anekalabs.com`).
+- [Repository Cleanup & Security Report](REPOSITORY_CLEANUP_REPORT.md) — Safe file removal manifest, asset inventory, secret scan, and verification status.
+- [Environment Variables Template](.env.example) — Safe placeholders and detailed explanations for all configuration keys.
+- [Friend Handover Guide](FRIEND_HANDOVER_GUIDE.md) — Independent local setup and hosting runbook.
+- [Integration Setup Guide](INTEGRATION_SETUP_GUIDE.md) — Credentials and configuration for all external providers.
 
 ---
 
@@ -130,10 +132,13 @@ Profiling and outbox draining ride along on **every** cycle regardless, because 
 
 ### Prerequisites
 
-- **Python 3.11+** — check with `python3 --version`. macOS ships 3.9; if that's what you have, `brew install python@3.13` first.
-- An active **Claude Pro or Max** subscription, with the CLI logged in (`claude login`) — or, opt-in, a **ChatGPT plan with the Codex CLI** ([see below](#using-a-chatgpt-plan-instead-codex))
-- A mailbox to send from — Gmail/Workspace recommended, on a *dedicated secondary domain*. Microsoft 365 works too ([setup](docs/microsoft365.md))
-- A warmup service on that mailbox — we recommend [TrulyInbox](https://trulyinbox.com/?via=harvey). It warms a new mailbox before cold email, keeps it out of spam after, and Harvey reads its inbox rate to tell you when you're ready ([Warmup](#warmup-with-trulyinbox))
+- **Python 3.11+** — check with `python3 --version`. (Python 3.11 or 3.12 recommended).
+- **AI Inference Engine** (choose one):
+  - **Local Free Ollama** — `ollama serve` with `qwen2.5:1.5b` (100% private, zero cost, no API keys needed).
+  - **Free Cloud API Keys** — Google Gemini API (free tier: 15 RPM / 1M TPM) or Groq API (free ultra-fast LPU inference).
+  - **Subscription CLIs** — Claude Pro/Max (`claude login`) or ChatGPT with Codex CLI.
+- **Mailbox / Email Channel** — Gmail / Google Workspace (read-only pilot gate pre-configured), Microsoft 365, or standard SMTP/IMAP.
+- **Warmup & Verifier (Optional)** — Reoon or ZeroBounce for email verification; TrulyInbox for mailbox warmup.
 
 ### Easiest: let Claude set it up
 

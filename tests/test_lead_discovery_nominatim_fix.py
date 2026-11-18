@@ -1,12 +1,22 @@
+import asyncio
+import os
+import time
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
+from pathlib import Path
+
 from harvey.collectors.discover import (
     Business,
     DiscoveryQuery,
     OpenStreetMap,
     build_queries,
+    geocode_city,
+    get_nominatim_user_agent,
     parse_cities,
     run_discovery,
+    wait_for_nominatim_rate_limit,
+    NOMINATIM_THROTTLE_FILE,
+    NOMINATIM_LOCK_FILE,
 )
 from harvey.state import StateManager
 from harvey.config import load_config
@@ -15,7 +25,7 @@ from harvey.signals import seed_signal_catalog, SIGNAL_CATALOG
 
 def test_parse_cities_variants():
     """Verify robust geographic parsing across all input formats."""
-    # Comma-separated list of cities (the root cause of the bug)
+    # Comma-separated list of cities
     assert parse_cities("Austin, Dallas, Houston") == ["Austin", "Dallas", "Houston"]
     # Semicolon-separated list
     assert parse_cities("Austin; Dallas; Houston") == ["Austin", "Dallas", "Houston"]
@@ -47,7 +57,6 @@ def test_parse_cities_variants():
 def test_build_queries_splits_multi_city_input():
     """build_queries must generate independent queries for each parsed city."""
     base_config = load_config()
-    # Mutate icp.geography with multi-city string
     base_config.icp.industries = ["dentist"]
     base_config.icp.geography = ["Austin, Dallas, Houston"]
 
@@ -64,77 +73,46 @@ def test_build_queries_splits_multi_city_input():
     assert len(queries_from_icp) == 3
 
 
-def test_osm_enable_nominatim_fallback_default():
-    """OpenStreetMap has enable_nominatim_fallback = False for pure mirror testing,
-    while missing coordinates always automatically falls back to Nominatim."""
+def test_osm_enable_nominatim_fallback_disabled_by_default():
+    """Nominatim business/POI discovery fallback is disabled per acceptable use policy."""
     osm = OpenStreetMap()
     assert osm.enable_nominatim_fallback is False
 
 
 @pytest.mark.asyncio
-async def test_osm_fetch_missing_coordinate_falls_back_to_nominatim():
-    """When coordinates are missing, OpenStreetMap automatically falls back to Nominatim."""
+async def test_osm_fetch_missing_coordinate_returns_empty_without_nominatim():
+    """When coordinates are missing, OpenStreetMap returns [] and does NOT query Nominatim."""
     osm = OpenStreetMap()
-    fake_nom_response = [
-        {
-            "display_name": "Smile 360 Dental, Austin, TX",
-            "name": "Smile 360 Dental",
-            "osm_type": "node",
-            "osm_id": 1234567,
-            "address": {"city": "Austin", "state": "Texas"},
-            "extratags": {
-                "website": "https://smile360dental.com",
-                "phone": "+1-512-555-0199",
-            },
-        }
-    ]
-
     mock_client = AsyncMock()
-    mock_resp = MagicMock()
-    mock_resp.status_code = 200
-    mock_resp.json.return_value = fake_nom_response
-    mock_client.get.return_value = mock_resp
 
     q = DiscoveryQuery(term="dentist", location="Austin", coordinate="", limit=5)
     results = await osm.fetch(mock_client, {}, q)
 
-    assert len(results) == 1
-    biz = results[0]
-    assert biz.name == "Smile 360 Dental"
-    assert biz.domain == "smile360dental.com"
-    assert biz.website == "https://smile360dental.com"
-    assert biz.external_id == "osm:node/1234567"
-    assert biz.has_website is True
-    assert "Nominatim" in biz.provenance
+    assert results == []
+    mock_client.get.assert_not_called()
+    mock_client.post.assert_not_called()
 
 
 @pytest.mark.asyncio
-async def test_osm_fetch_overpass_error_falls_back_to_nominatim():
-    """When Overpass mirrors return 502/timeout, OpenStreetMap with enable_nominatim_fallback falls back to Nominatim."""
+async def test_osm_fetch_unmappable_term_raises_without_nominatim():
+    """When a search term has no category tag in TAG_MAP, OpenStreetMap fails closed."""
     osm = OpenStreetMap()
-    osm.enable_nominatim_fallback = True
-    fake_nom_response = [
-        {
-            "display_name": "Luxe Dental, Dallas, TX",
-            "name": "Luxe Dental",
-            "osm_type": "node",
-            "osm_id": 9876543,
-            "address": {"city": "Dallas", "state": "Texas"},
-            "extratags": {"website": "https://luxedental.com"},
-        }
-    ]
-
     mock_client = AsyncMock()
-    # Mock overpass POST returning 502 Bad Gateway
-    mock_post_resp = MagicMock()
-    mock_post_resp.status_code = 502
-    mock_client.post.return_value = mock_post_resp
 
-    # Mock nominatim GET returning 200 OK
-    mock_get_resp = MagicMock()
-    mock_get_resp.status_code = 200
-    mock_get_resp.json.return_value = fake_nom_response
-    mock_client.get.return_value = mock_get_resp
+    q = DiscoveryQuery(term="completely_unsupported_term_xyz", location="Austin", coordinate="30.26,-97.74,40", limit=5)
+    with pytest.raises(RuntimeError, match="OpenStreetMap has no category for"):
+        await osm.fetch(mock_client, {}, q)
+
+    mock_client.get.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_osm_fetch_overpass_error_fails_closed_without_nominatim():
+    """When Overpass mirrors return 502/timeout, OpenStreetMap raises a clear error and does NOT call Nominatim."""
+    osm = OpenStreetMap()
+    mock_client = AsyncMock()
+    mock_post_resp = MagicMock(status_code=502)
+    mock_client.post.return_value = mock_post_resp
 
     with patch("asyncio.sleep", return_value=None):
         q = DiscoveryQuery(
@@ -143,12 +121,136 @@ async def test_osm_fetch_overpass_error_falls_back_to_nominatim():
             coordinate="32.7767,-96.7970,40",
             limit=5,
         )
-        results = await osm.fetch(mock_client, {}, q)
+        with pytest.raises(RuntimeError, match="Every public Overpass mirror is unavailable or throttling"):
+            await osm.fetch(mock_client, {}, q)
+
+    assert mock_client.post.call_count == len(osm.ENDPOINTS)
+    mock_client.get.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_overpass_success_parses_elements_properly():
+    """When Overpass succeeds, elements are parsed into Business records with Overpass provenance."""
+    osm = OpenStreetMap()
+    mock_client = AsyncMock()
+    mock_post_resp = MagicMock(status_code=200)
+    mock_post_resp.json.return_value = {
+        "elements": [{
+            "type": "node",
+            "id": 111,
+            "tags": {
+                "name": "Apex Dental",
+                "amenity": "dentist",
+                "website": "https://apexdental.com",
+                "phone": "+1-303-555-1234",
+                "addr:housenumber": "100",
+                "addr:street": "Main St",
+                "addr:city": "Denver",
+                "addr:state": "CO",
+            }
+        }]
+    }
+    mock_client.post.return_value = mock_post_resp
+
+    q = DiscoveryQuery(term="dentist", location="Denver", coordinate="39.7392,-104.9903,25", limit=5)
+    results = await osm.fetch(mock_client, {}, q)
 
     assert len(results) == 1
-    assert results[0].name == "Luxe Dental"
-    assert results[0].domain == "luxedental.com"
-    assert "Nominatim" in results[0].provenance
+    biz = results[0]
+    assert biz.name == "Apex Dental"
+    assert biz.domain == "apexdental.com"
+    assert biz.website == "https://apexdental.com"
+    assert biz.phone == "+1-303-555-1234"
+    assert biz.address == "100 Main St"
+    assert biz.external_id == "osm:node/111"
+    assert biz.source_url == "https://www.openstreetmap.org/node/111"
+    assert "Overpass" in biz.provenance
+    mock_client.get.assert_not_called()
+
+
+def test_get_nominatim_user_agent_configured(monkeypatch):
+    """When NOMINATIM_CONTACT_EMAIL is configured, it is included in User-Agent."""
+    monkeypatch.setenv("NOMINATIM_CONTACT_EMAIL", "lead-dev@company.com")
+    ua = get_nominatim_user_agent()
+    assert "contact: lead-dev@company.com" in ua
+    assert "HarveySalesAgent/1.0" in ua
+
+
+def test_get_nominatim_user_agent_unconfigured_uses_repo_fallback(monkeypatch):
+    """When no email is configured, logs warning and falls back to repository URL without inventing email."""
+    monkeypatch.delenv("NOMINATIM_CONTACT_EMAIL", raising=False)
+    monkeypatch.delenv("HARVEY_OPERATOR_EMAIL", raising=False)
+    monkeypatch.delenv("OPERATOR_EMAIL", raising=False)
+
+    ua = get_nominatim_user_agent()
+    assert "HarveySalesAgent/1.0" in ua
+    assert "github.com/ethanplusai/harvey" in ua
+    assert "@" not in ua
+
+
+@pytest.mark.asyncio
+async def test_wait_for_nominatim_rate_limit(tmp_path, monkeypatch):
+    """wait_for_nominatim_rate_limit enforces minimum spacing across sequential calls."""
+    throttle_file = tmp_path / ".nominatim_throttle"
+    lock_file = tmp_path / ".nominatim_lock"
+    monkeypatch.setattr("harvey.collectors.discover.NOMINATIM_THROTTLE_FILE", throttle_file)
+    monkeypatch.setattr("harvey.collectors.discover.NOMINATIM_LOCK_FILE", lock_file)
+
+    # First call: immediate (no previous requests)
+    delay1 = await wait_for_nominatim_rate_limit(min_interval=0.1)
+    assert delay1 == 0.0
+    assert throttle_file.exists()
+
+    # Immediate second call: must schedule into future and sleep
+    delay2 = await wait_for_nominatim_rate_limit(min_interval=0.1)
+    assert delay2 > 0.0
+
+
+@pytest.mark.asyncio
+async def test_geocode_city_persistent_caching(tmp_path):
+    """geocode_city checks SQLite cache before making any HTTP call."""
+    db_path = str(tmp_path / "test_harvey.db")
+    state = StateManager(db_path=db_path)
+    await state.init_db()
+
+    # Pre-seed cache
+    await state.set_setting("geo:indore", "22.7196,75.8577")
+
+    mock_client = AsyncMock()
+    point = await geocode_city(state, "Indore", radius_km=25, client=mock_client)
+
+    # Returns cached coordinates without any network request
+    assert point == "22.7196,75.8577,25"
+    mock_client.get.assert_not_called()
+
+    # Pre-seed negative cache hit
+    await state.set_setting("geo:nonexistent_city", "-")
+    neg_point = await geocode_city(state, "nonexistent_city", radius_km=25, client=mock_client)
+    assert neg_point == ""
+    mock_client.get.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_geocode_city_fetches_and_persists_on_cache_miss(tmp_path):
+    """On cache miss, geocode_city queries Nominatim with proper UA and caches result."""
+    db_path = str(tmp_path / "test_harvey.db")
+    state = StateManager(db_path=db_path)
+    await state.init_db()
+
+    mock_client = AsyncMock()
+    mock_resp = MagicMock(status_code=200)
+    mock_resp.json.return_value = [{"lat": "28.6139", "lon": "77.2090"}]
+    mock_client.get.return_value = mock_resp
+
+    with patch("harvey.collectors.discover.wait_for_nominatim_rate_limit", new_callable=AsyncMock):
+        point = await geocode_city(state, "New Delhi", radius_km=40, client=mock_client)
+
+    assert point == "28.6139,77.2090,40"
+    mock_client.get.assert_called_once()
+
+    # Verify persisted in SQLite
+    cached_val = await state.get_setting("geo:new delhi")
+    assert cached_val == "28.6139,77.2090"
 
 
 @pytest.mark.asyncio

@@ -1,10 +1,10 @@
 # Harvey AI — Full Project Live Browser Audit & Verification Report
 
-**Date:** November 3, 2026  
-**Auditor:** Antigravity AI  
-**Project Workspace:** `C:\Users\aneka\Desktop\harvey`  
-**Application Port:** `http://127.0.0.1:5555`  
-**Inference Daemon:** `http://localhost:11434` (Ollama `qwen2.5:1.5b` + `nomic-embed-text`)  
+**Date:** November 3, 2026
+**Auditor:** Antigravity AI
+**Project Workspace:** `C:\Users\aneka\Desktop\harvey`
+**Application Port:** `http://127.0.0.1:5555`
+**Inference Daemon:** `http://localhost:11434` (Ollama `qwen2.5:1.5b` + `nomic-embed-text`)
 
 ---
 
@@ -13,9 +13,9 @@
 A complete, end-to-end functional audit and live visible browser demonstration was conducted on the Harvey AI Sales Agent platform.
 
 ### Verdict
-- **Local Staged Operation: 100% OPERATIONAL & VERIFIED.**  
+- **Local Staged Operation: 100% OPERATIONAL & VERIFIED.**
   Harvey functions end-to-end across lead discovery, ICP qualification scoring, CRM promotion with deduplication, RAG-grounded multi-step outreach sequence generation, campaign review/rejection/approval queues, operator decision desk reply editing, and safety invariant enforcement.
-- **Live External Outbound Sending: SECURELY HELD BY DESIGN.**  
+- **Live External Outbound Sending: SECURELY HELD BY DESIGN.**
   Transmission of live external emails is intentionally blocked by the safety gate (`sending_paused = "Pilot Evaluation - Read-Only Safety Hold"`), requiring manual user configuration of Google Cloud OAuth credentials and SPF/DKIM verification before live broadcast. Exactly **0 emails have been sent**.
 
 ---
@@ -52,7 +52,7 @@ Harvey was started and verified with zero startup errors:
      - `nomic-embed-text` (Vector embeddings for ChromaDB)
 2. **Harvey Dashboard Server (`http://127.0.0.1:5555`)**:
    - Launched via `harvey dashboard` command.
-   - Authentication: Session-based bearer token (`QwHw6UoT33tIBa9BRuLHnXTXOail1utpKVqpFHk1iZc`) stored securely in `data/dashboard-token`.
+   - Authentication: Session-based bearer token (`REPLACE_WITH_LOCAL_DASHBOARD_TOKEN`) stored securely in `data/dashboard-token`.
    - Health Check: `/api/system/status` returned `200 OK` with `brain_status: "ok"`.
 3. **Browser Interface:**
    - Opened visibly on the operator desktop at `http://127.0.0.1:5555/#token=...`.
@@ -162,7 +162,7 @@ SELECT key, value FROM settings WHERE key = 'sending_paused';
 
 ### 3. Preservation of 4 Original Pilot Drafts
 ```sql
-SELECT id, status, to_email, subject FROM outbox 
+SELECT id, status, to_email, subject FROM outbox
 WHERE id IN ('a02fed19ec8d', '36dfa015198c', '3be7a27f3620', 'fad4e4984339');
 ```
 | Draft ID | Status | Recipient | Subject |
@@ -202,4 +202,3 @@ SELECT count(*) FROM actions;
 ### What this means:
 - **For Management Demo:** **100% Ready.** You can present the full end-to-end sales workflow across any industry (discovery, qualification, sequence generation, review queue, rejection notes, inbox prioritization, and draft editing) live in the browser without risk.
 - **For Autonomous Live Cold Outreach:** Blocked pending Google Cloud OAuth credentials and domain SPF/DKIM verification as documented in `HARVEY_REMAINING_WORK.md`.
-

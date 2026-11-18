@@ -21,6 +21,8 @@ already learned.
 """
 
 import asyncio
+import os
+import sys
 import time
 import base64
 import logging
@@ -29,11 +31,13 @@ import re
 from html import unescape
 from dataclasses import dataclass, field, replace
 from datetime import date, timedelta
+from pathlib import Path
 from urllib.parse import urlparse
 
 import httpx
 
 from harvey.models import Company
+from harvey.paths import PROJECT_ROOT
 
 logger = logging.getLogger("harvey.collectors.discover")
 
@@ -362,7 +366,128 @@ def parse_cities(raw_input: str | list[str] | None) -> list[str]:
 
 
 NOMINATIM = "https://nominatim.openstreetmap.org/search"
-GEOCODE_UA = "Harvey/0.1 (open-source sales agent; github.com/ethanplusai/harvey)"
+NOMINATIM_MIN_INTERVAL: float = 1.1
+NOMINATIM_THROTTLE_FILE = PROJECT_ROOT / "data" / ".nominatim_throttle"
+NOMINATIM_LOCK_FILE = PROJECT_ROOT / "data" / ".nominatim_lock"
+
+_in_process_nominatim_lock = asyncio.Lock()
+_nominatim_ua_warned: bool = False
+
+
+class _NominatimFileLock:
+    """Best-effort non-blocking cross-process lock using msvcrt (Windows) or fcntl (POSIX)."""
+
+    def __init__(self, path: Path):
+        self.path = path
+        self.handle = None
+
+    def __enter__(self):
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            self.handle = open(self.path, "a+b")
+        except OSError:
+            return self
+        start = time.monotonic()
+        while True:
+            try:
+                if sys.platform == "win32":
+                    import msvcrt
+                    self.handle.seek(0)
+                    msvcrt.locking(self.handle.fileno(), msvcrt.LK_NBLCK, 1)
+                else:
+                    import fcntl
+                    fcntl.flock(self.handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                return self
+            except OSError:
+                if time.monotonic() - start > 5.0:
+                    return self
+                time.sleep(0.01)
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        if self.handle:
+            try:
+                if sys.platform == "win32":
+                    import msvcrt
+                    self.handle.seek(0)
+                    msvcrt.locking(self.handle.fileno(), msvcrt.LK_UNLCK, 1)
+                else:
+                    import fcntl
+                    fcntl.flock(self.handle.fileno(), fcntl.LOCK_UN)
+            except OSError:
+                pass
+            try:
+                self.handle.close()
+            except OSError:
+                pass
+
+
+async def wait_for_nominatim_rate_limit(min_interval: float = NOMINATIM_MIN_INTERVAL) -> float:
+    """Enforce >= 1.1s spacing across all Harvey processes and async tasks."""
+    async with _in_process_nominatim_lock:
+        now = time.time()
+        delay = 0.0
+        try:
+            with _NominatimFileLock(NOMINATIM_LOCK_FILE):
+                last_reserved = 0.0
+                if NOMINATIM_THROTTLE_FILE.exists():
+                    try:
+                        content = NOMINATIM_THROTTLE_FILE.read_text(encoding="utf-8").strip()
+                        if content:
+                            last_reserved = float(content)
+                    except Exception:
+                        last_reserved = 0.0
+
+                # Protect against system clock changes backwards or far future
+                if last_reserved > now + 300.0:
+                    last_reserved = 0.0
+
+                if now < last_reserved:
+                    scheduled_time = last_reserved
+                    next_reserved = last_reserved + min_interval
+                else:
+                    scheduled_time = now
+                    next_reserved = now + min_interval
+
+                NOMINATIM_THROTTLE_FILE.parent.mkdir(parents=True, exist_ok=True)
+                NOMINATIM_THROTTLE_FILE.write_text(f"{next_reserved:.4f}", encoding="utf-8")
+                delay = max(0.0, scheduled_time - now)
+        except Exception as e:
+            logger.warning("Error reading/writing Nominatim throttle file: %s", e)
+            delay = 0.0
+
+        if delay > 0:
+            await asyncio.sleep(delay)
+        return delay
+
+
+def get_nominatim_user_agent() -> str:
+    """Return compliant User-Agent for Nominatim requests per official Usage Policy.
+
+    Configured via NOMINATIM_CONTACT_EMAIL or HARVEY_OPERATOR_EMAIL in .env / os.environ.
+    If not configured or placeholder, logs a warning once and identifies with repo URL.
+    """
+    global _nominatim_ua_warned
+    email = (
+        os.environ.get("NOMINATIM_CONTACT_EMAIL")
+        or os.environ.get("HARVEY_OPERATOR_EMAIL")
+        or os.environ.get("OPERATOR_EMAIL")
+        or ""
+    ).strip()
+
+    if email and ("@" in email) and not email.endswith(".local"):
+        return f"HarveySalesAgent/1.0 (open-source sales agent; contact: {email}; https://github.com/ethanplusai/harvey)"
+
+    if not _nominatim_ua_warned:
+        logger.warning(
+            "NOMINATIM_CONTACT_EMAIL is not set. Nominatim usage policy requires a valid contact email "
+            "for automated requests. Please set NOMINATIM_CONTACT_EMAIL in .env."
+        )
+        _nominatim_ua_warned = True
+
+    return "HarveySalesAgent/1.0 (open-source sales agent; https://github.com/ethanplusai/harvey)"
+
+
+GEOCODE_UA = get_nominatim_user_agent()
 
 
 async def geocode_city(state, city: str, radius_km: int = 40,
@@ -376,13 +501,15 @@ async def geocode_city(state, city: str, radius_km: int = 40,
         # A previous miss is cached as "-" so we don't re-ask every run.
         return "" if cached == "-" else f"{cached},{radius_km}"
 
+    await wait_for_nominatim_rate_limit()
+
     owned = client is None
     client = client or httpx.AsyncClient(timeout=TIMEOUT)
     try:
         r = await client.get(
             NOMINATIM,
             params={"q": city, "format": "json", "limit": 1},
-            headers={"User-Agent": GEOCODE_UA},
+            headers={"User-Agent": get_nominatim_user_agent()},
         )
         r.raise_for_status()
         hits = r.json()
@@ -1168,7 +1295,7 @@ class OpenStreetMap(DiscoveryProvider):
     # timed-out one. Every one of them is another mirror's problem to solve, so
     # walk on. A 400 (bad query) or 404 is ours and fails here and now.
     RETRY_STATUSES = frozenset({429, 500, 502, 503, 504})
-    enable_nominatim_fallback: bool = False
+    enable_nominatim_fallback: bool = False  # Disabled per Nominatim usage policy (bulk POI discovery prohibited)
 
     # A friendly term maps to the OSM tags that actually carry those businesses.
     TAG_MAP = {
@@ -1233,81 +1360,13 @@ class OpenStreetMap(DiscoveryProvider):
                 return tags
         return []
 
-    async def _fetch_nominatim(self, client, query) -> list[Business]:
-        """Free OpenStreetMap Nominatim POI/directory fallback search."""
-        try:
-            nom_headers = {
-                "User-Agent": "HarveySalesAgent/1.0 (contact: support@harvey-sales.local)",
-                "Accept-Language": "en-US,en;q=0.9",
-            }
-            locations = parse_cities(query.location) if query.location else [""]
-            out = []
-            for i, loc in enumerate(locations):
-                if i:
-                    await asyncio.sleep(1.1)
-                nom_query = f"{query.term} in {loc}" if loc else query.term
-                r_nom = await client.get(
-                    "https://nominatim.openstreetmap.org/search",
-                    params={
-                        "q": nom_query,
-                        "format": "json",
-                        "addressdetails": 1,
-                        "extratags": 1,
-                        "limit": min(query.limit, 20),
-                    },
-                    headers=nom_headers,
-                    timeout=httpx.Timeout(15.0),
-                )
-                if r_nom.status_code == 200:
-                    nom_items = r_nom.json()
-                    for item in nom_items:
-                        disp_name = item.get("display_name") or ""
-                        first_part = disp_name.split(",")[0].strip()
-                        raw_name = item.get("name") or first_part or f"{query.term.title()} Provider"
-                        osm_type = item.get("osm_type", "node")
-                        osm_id = item.get("osm_id", "")
-                        addr_dict = item.get("address") or {}
-                        extratags = item.get("extratags") or {}
-                        site = extratags.get("website") or extratags.get("contact:website") or extratags.get("url") or ""
-                        phone = extratags.get("phone") or extratags.get("contact:phone") or ""
-                        city = addr_dict.get("city") or addr_dict.get("town") or addr_dict.get("county") or loc
-                        state_name = addr_dict.get("state") or ""
-                        full_loc = f"{city}, {state_name}".strip(", ") if state_name else city
-                        out.append(Business(
-                            name=raw_name,
-                            domain=normalize_domain(site) if site else "",
-                            website=site,
-                            phone=phone,
-                            address=disp_name,
-                            location=full_loc,
-                            category=query.term or "business",
-                            has_website=bool(site),
-                            external_id=f"osm:{osm_type}/{osm_id}",
-                            source_url=f"https://www.openstreetmap.org/{osm_type}/{osm_id}",
-                            provider=self.key,
-                            provenance="OpenStreetMap Nominatim (Free Public Geo Directory)",
-                            source_limitation="Physical premises & registered OSM nodes; trade directory coverage may be thinner than proprietary SERP engines.",
-                        ))
-            if out:
-                return out
-        except Exception as nom_err:
-            logger.warning("Nominatim search failed: %s", nom_err)
-        return []
-
     async def fetch(self, client, env, query):
         if not query.coordinate:
-            nom_results = await self._fetch_nominatim(client, query)
-            if nom_results:
-                return nom_results
             logger.warning("osm: no coordinate for %r — Overpass needs a "
                            "lat,lng,radius to search", query.keyword())
             return []
         tags = self._tags(query.term)
         if not tags:
-            if getattr(self, "enable_nominatim_fallback", True):
-                nom_results = await self._fetch_nominatim(client, query)
-                if nom_results:
-                    return nom_results
             raise RuntimeError(
                 f"OpenStreetMap has no category for {query.term!r}. It can only "
                 f"search mapped trades ({', '.join(sorted(self.TAG_MAP))}). Use a "
@@ -1323,7 +1382,7 @@ class OpenStreetMap(DiscoveryProvider):
                 f"out center {query.limit};")
 
         # Overpass is a free volunteer service and throttles, 502s and times
-        # out readily under load. Walk the mirrors, then fallback to Nominatim:
+        # out readily under load. Walk the mirrors:
         headers = {"User-Agent": "Harvey/0.1 (open-source sales agent; "
                                  "github.com/ethanplusai/harvey)"}
         r = None
@@ -1342,11 +1401,6 @@ class OpenStreetMap(DiscoveryProvider):
             logger.warning("osm: %s is throttling or down (%s) — trying the "
                            "next mirror", endpoint, r.status_code)
         else:
-            if getattr(self, "enable_nominatim_fallback", True):
-                logger.warning("All Overpass mirrors busy; falling back to OpenStreetMap Nominatim search for %s", query.keyword())
-                nom_results = await self._fetch_nominatim(client, query)
-                if nom_results:
-                    return nom_results
             raise RuntimeError(
                 "Every public Overpass mirror is unavailable or throttling "
                 "right now. This is free volunteer infrastructure — wait a few "
@@ -1845,7 +1899,7 @@ def build_queries(config, cities: list[str] | None = None,
         terms = [tpl.format(industry=t, role=r, since=since)
                  for r in roles for t in terms for tpl in templates]
         raw_places = cities if cities is not None else ([""] if not spec["local"] else list(icp.geography) or [""])
-        places = parse_cities(raw_places) if raw_places else [""]
+        places = parse_cities(raw_places) or [""]
     else:
         # "roofing contractor" is one way to search for a roofer. Each
         # configured variant is another search in every city — ranks differ
@@ -1854,7 +1908,7 @@ def build_queries(config, cities: list[str] | None = None,
         terms = list(dict.fromkeys(
             v.strip() for t in terms for v in [t, *variants.get(t, [])] if v.strip()))
         raw_places = cities if cities is not None else list(icp.geography) or [""]
-        places = parse_cities(raw_places) if raw_places else [""]
+        places = parse_cities(raw_places) or [""]
     coords = getattr(icp, "geo_coordinates", {}) or {}
 
     return [
@@ -2185,4 +2239,3 @@ def provider_menu(env: dict | None = None) -> list[dict]:
         }
         for p in PROVIDERS.values()
     ]
-

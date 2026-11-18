@@ -219,7 +219,7 @@ def test_loopback_hosts_are_accepted(env, host):
         assert r.status_code == 200, host
 
 
-async def _raw(headers, method="GET", path="/api/companies", body=b""):
+async def _raw(headers, method="GET", path="/api/companies", body=b"", client=("127.0.0.1", 1)):
     """Drive the ASGI app directly, for header shapes clients won't send."""
     sent = []
 
@@ -231,11 +231,31 @@ async def _raw(headers, method="GET", path="/api/companies", body=b""):
 
     scope = {"type": "http", "asgi": {"version": "3.0"}, "http_version": "1.1",
              "method": method, "scheme": "http", "path": path, "raw_path": path.encode(),
-             "query_string": b"", "root_path": "", "client": ("127.0.0.1", 1),
+             "query_string": b"", "root_path": "", "client": client,
              "server": ("127.0.0.1", 5555),
              "headers": [(k.lower().encode(), v.encode()) for k, v in headers]}
     await dash.app(scope, receive, send)
     return next(m["status"] for m in sent if m["type"] == "http.response.start")
+
+
+@pytest.mark.asyncio
+async def test_tailscale_and_cloudflare_forwarded_hosts_are_allowed(env):
+    bearer = ("authorization", f"Bearer {env['token']}")
+    # 1. Allowed Tailscale hostname from local proxy
+    assert await _raw([("host", "127.0.0.1:5555"), ("x-forwarded-host", "alpl.tail80a245.ts.net"), bearer]) == 200
+    # 2. Allowed Cloudflare hostname from local proxy
+    assert await _raw([("host", "127.0.0.1:5555"), ("x-forwarded-host", "test-demo.trycloudflare.com"), bearer]) == 200
+    # 3. Direct Host naming the allowed Tailscale hostname (Tailscale reverse proxy behavior)
+    assert await _raw([("host", "alpl.tail80a245.ts.net"), bearer]) == 200
+    # 4. Unknown forwarded host rejected
+    assert await _raw([("host", "127.0.0.1:5555"), ("x-forwarded-host", "evil.attacker.example"), bearer]) == 400
+    # 5. Multiple X-Forwarded-Host rejected
+    assert await _raw([("host", "127.0.0.1:5555"), ("x-forwarded-host", "alpl.tail80a245.ts.net"),
+                       ("x-forwarded-host", "evil.example"), bearer]) == 400
+    # 6. Spoofed X-Forwarded-Host from untrusted remote client rejected
+    assert await _raw([("host", "127.0.0.1:5555"), ("x-forwarded-host", "alpl.tail80a245.ts.net"), bearer],
+                      client=("198.51.100.24", 45678)) == 400
+
 
 
 @pytest.mark.asyncio

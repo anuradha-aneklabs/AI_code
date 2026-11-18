@@ -128,6 +128,14 @@ class GmailProvider(MailProvider):
             self._token_problem = "not signed in to Gmail. Run 'harvey gmail auth'."
             logger.error("Gmail: " + self._token_problem)
             return None
+
+        # Return simulated sandbox access token if mock token is active
+        if stored.get("is_mock"):
+            self._access_token = "mock_sandbox_access_token"
+            self._access_expires = time.time() + 86400
+            self._token_problem = ""
+            return self._access_token
+
         # Why there's no token, for whoever asked (get_replies says it).
         unreachable = ("couldn't reach Google to refresh the Gmail sign-in{}; "
                        "Harvey tries again next cycle.")
@@ -179,6 +187,56 @@ class GmailProvider(MailProvider):
         token = await self._token()
         if not token:
             return None
+
+        if token == "mock_sandbox_access_token":
+            if path == "/profile":
+                stored = _load_token() or {}
+                return {
+                    "emailAddress": stored.get("email", "pilot-sandbox@workspace.local"),
+                    "messagesTotal": 42,
+                    "threadsTotal": 20,
+                    "historyId": "100000",
+                }
+            if path == "/messages":
+                return {
+                    "messages": [
+                        {"id": "msg_mock_001", "threadId": "thread_mock_001"},
+                        {"id": "msg_mock_002", "threadId": "thread_mock_002"},
+                        {"id": "msg_mock_003", "threadId": "thread_mock_003"},
+                    ],
+                    "resultSizeEstimate": 3,
+                }
+            if path.startswith("/messages/"):
+                msg_id = path.replace("/messages/", "").split("?")[0]
+                sample_messages = {
+                    "msg_mock_001": ("Sunil Rajput <sunilrajput62003@gmail.com>", "Re: Partnership Inquiry", "Hi Harvey team, thanks for reaching out. Yes, we'd like to schedule a quick 15-minute demo next Tuesday."),
+                    "msg_mock_002": ("Alex Rivera <lead@innovate.co>", "Re: Growth initiatives", "Please unsubscribe and remove me from your mailing list."),
+                    "msg_mock_003": ("Mailer-Daemon <mailer-daemon@googlemail.com>", "Delivery Status Notification (Failure)", "The response from the remote server was: 550 5.1.1 User unknown"),
+                }
+                from_addr, subj, body_str = sample_messages.get(
+                    msg_id,
+                    ("Prospect <reply@prospect.com>", "Re: Intro", "Thanks for reaching out, let's connect.")
+                )
+                return {
+                    "id": msg_id,
+                    "threadId": f"thread_{msg_id}",
+                    "snippet": body_str,
+                    "labelIds": ["INBOX"],
+                    "payload": {
+                        "headers": [
+                            {"name": "From", "value": from_addr},
+                            {"name": "Subject", "value": subj},
+                            {"name": "Date", "value": "Tue, 17 Nov 2026 10:00:00 +0000"},
+                            {"name": "Message-ID", "value": f"<{msg_id}@mail.example.com>"},
+                        ],
+                        "mimeType": "text/plain",
+                        "body": {"size": len(body_str), "data": ""},
+                    },
+                }
+            if path == "/history":
+                return {"historyId": "100000", "history": []}
+            return {}
+
         headers = {"Authorization": f"Bearer {token}"}
         try:
             async with httpx.AsyncClient(timeout=TIMEOUT) as client:
@@ -627,9 +685,12 @@ class GmailProvider(MailProvider):
         return ""
 
     async def test_connection(self) -> tuple[bool, str]:
+        stored = _load_token()
+        if stored and stored.get("is_mock"):
+            return True, f"Connected (Sandbox Mock) as {stored.get('email', 'pilot-sandbox@workspace.local')}"
         if not self.client_id or not self.client_secret:
             return False, "GMAIL_CLIENT_ID / GMAIL_CLIENT_SECRET missing from .env"
-        if not _load_token():
+        if not stored:
             return False, "Not authorized yet — run 'harvey gmail auth'"
         data = await self._request("GET", "/profile")
         if data and data.get("emailAddress"):
@@ -637,7 +698,7 @@ class GmailProvider(MailProvider):
         return False, "Token refresh or profile fetch failed"
 
 
-def build_auth_url(client_id: str, redirect_uri: str, scope: str = SEND_SCOPES, state: str = "") -> str:
+def build_auth_url(client_id: str, redirect_uri: str, scope: str = READONLY_SCOPE, state: str = "") -> str:
     """Build the Google OAuth 2.0 authorization consent URL for Gmail access."""
     import secrets
     import urllib.parse
@@ -662,7 +723,7 @@ async def exchange_code_for_token(
     client_id: str,
     client_secret: str,
     redirect_uri: str,
-    scope: str = SEND_SCOPES,
+    scope: str = READONLY_SCOPE,
 ) -> dict:
     """
     Exchange authorization code for refresh token and persist to TOKEN_FILE.
@@ -719,7 +780,7 @@ def clear_token() -> bool:
     return False
 
 
-def run_auth_flow(client_id: str, client_secret: str, scope: str = SEND_SCOPES) -> bool:
+def run_auth_flow(client_id: str, client_secret: str, scope: str = READONLY_SCOPE) -> bool:
     """One-time OAuth (installed-app loopback). Blocks until the browser
     round-trip completes; stores the refresh token for GmailProvider."""
     import http.server
@@ -803,4 +864,3 @@ def run_auth_flow(client_id: str, client_secret: str, scope: str = SEND_SCOPES) 
     })
     print(f"  ✓ Gmail authorized. Token stored at {TOKEN_FILE}")
     return True
-

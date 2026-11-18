@@ -40,13 +40,24 @@ def test_api_summary_endpoint(api_client):
 
 def test_honest_provider_connection_reporting(api_client):
     """Verify test-connection endpoint never reports sandbox mocks as live connections."""
-    # 1. Local / open services should succeed
-    for prov in ("openstreetmap", "chromadb", "ollama"):
+    # 1. Local / open services:
+    # OpenStreetMap is free public web service, ChromaDB is in-process local vector store
+    for prov in ("openstreetmap", "chromadb"):
         resp = api_client.post("/api/integrations/test-connection", json={"provider": prov})
         assert resp.status_code == 200
         data = resp.json()
         assert data.get("success") is True, f"Expected {prov} to be connected"
         assert data.get("status") == "connected"
+
+    # Ollama is local service: if running, reports connected; if offline, honestly reports api_error
+    resp = api_client.post("/api/integrations/test-connection", json={"provider": "ollama"})
+    assert resp.status_code == 200
+    data = resp.json()
+    if data.get("status") == "connected":
+        assert data.get("success") is True
+    else:
+        assert data.get("success") is False
+        assert "ollama connection failed" in data.get("message", "").lower()
 
     # 2. Gmail connection reporting: if live token present, reports connected; if mock token, reports sandbox_active
     resp = api_client.post("/api/integrations/test-connection", json={"provider": "gmail"})
@@ -67,4 +78,3 @@ def test_honest_provider_connection_reporting(api_client):
         data = resp.json()
         assert data.get("success") is False
         assert data.get("status") == "credentials_missing"
-

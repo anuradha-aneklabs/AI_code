@@ -117,8 +117,29 @@ async def test_find_email_disposable_and_mx_classification():
 @pytest.mark.asyncio
 async def test_task_router_fallback_to_local_ollama():
     """Verify TaskRouter automatically cascades from missing cloud keys to local Ollama."""
+    from unittest.mock import patch, AsyncMock
+    from harvey.providers.base import ProviderResult
+
     router = TaskRouter(config={"provider": "groq"})
-    result = await router.execute(prompt="Reply with exactly 'OK'", task="general", timeout=15.0)
+    mock_ollama_result = ProviderResult(
+        text="OK",
+        provider="ollama",
+        model="qwen2.5:1.5b",
+        input_tokens=5,
+        output_tokens=2,
+        cost_usd=0.0,
+    )
+
+    ollama_provider = router.get_provider("ollama")
+    is_live = await ollama_provider.preflight() is None
+
+    if is_live:
+        result = await router.execute(prompt="Reply with exactly 'OK'", task="general", timeout=15.0)
+    else:
+        with patch.object(ollama_provider, "preflight", new_callable=AsyncMock, return_value=None), \
+             patch.object(ollama_provider, "generate", new_callable=AsyncMock, return_value=mock_ollama_result):
+            result = await router.execute(prompt="Reply with exactly 'OK'", task="general", timeout=15.0)
+
     assert result.fallback_used is True
     assert result.provider == "ollama"
     assert result.model == "qwen2.5:1.5b"

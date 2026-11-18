@@ -42,6 +42,7 @@ import errno
 import hmac
 import ipaddress
 import json
+import logging
 import os
 import re
 import secrets
@@ -49,6 +50,9 @@ import stat
 import threading
 import time
 from pathlib import Path
+from urllib.parse import urlsplit
+
+logger = logging.getLogger("harvey.dashboard_auth")
 
 TOKEN_RE = re.compile(r"[A-Za-z0-9_-]{43,128}")
 _PORT_RE = re.compile(r":[0-9]{1,5}")
@@ -299,6 +303,46 @@ def _is_json(content_type: str) -> bool:
     return media == "application/json"
 
 
+def _get_allowed_hosts() -> list[str]:
+    """Return the list of allowed hostnames/patterns in lowercase."""
+    raw = os.environ.get("HARVEY_ALLOWED_HOSTS")
+    if raw is None:
+        try:
+            import harvey.dashboard as dash
+            env_file = getattr(dash, "ENV_FILE", None)
+        except Exception:
+            env_file = None
+        if not env_file or not Path(env_file).is_file():
+            env_file = Path(__file__).resolve().parent.parent / ".env"
+        if env_file and Path(env_file).is_file():
+            try:
+                from dotenv import dotenv_values
+                vals = dotenv_values(env_file)
+                raw = vals.get("HARVEY_ALLOWED_HOSTS")
+            except Exception:
+                raw = None
+    if not raw:
+        return []
+    return [h.strip().lower() for h in raw.split(",") if h.strip()]
+
+
+def is_host_allowed(host: str | None, allowed_hosts: list[str]) -> bool:
+    """Check if host matches loopback, wildcard, exact allowed hosts, or wildcard domain."""
+    if not host:
+        return False
+    host = host.lower()
+    if is_loopback(host):
+        return True
+    if "*" in allowed_hosts:
+        return True
+    if host in allowed_hosts:
+        return True
+    for h in allowed_hosts:
+        if h.startswith("*.") and (host == h[2:] or host.endswith(h[1:])):
+            return True
+    return False
+
+
 class DashboardGuard:
     """ASGI middleware applying the checks in the module docstring to every
     request, and the security headers to every response."""
@@ -319,36 +363,55 @@ class DashboardGuard:
         for k, v in scope.get("headers") or []:
             headers.setdefault(k.decode("latin-1").lower(), []).append(v.decode("latin-1"))
 
-        async def send_secured(message):
+        method = scope.get("method", "GET").upper()
+        path = scope.get("path", "")
+        allowed_hosts = _get_allowed_hosts()
+        origin_raw: str | None = None
+        origin_is_trusted = False
+        host_header: str = ""
+
+        async def send_secured(message, allow_cors=True):
             if message["type"] == "http.response.start":
                 existing = [(k, v) for k, v in message.get("headers", [])
-                            if k.lower() not in {h for h, _ in SECURITY_HEADERS}]
-                message = {**message, "headers": existing + SECURITY_HEADERS}
+                            if k.lower() not in {h for h, _ in SECURITY_HEADERS}
+                            and k.lower() != b"access-control-allow-origin"]
+                cors_extra = []
+                if allow_cors and origin_is_trusted and origin_raw:
+                    cors_extra.append((b"access-control-allow-origin", origin_raw.encode("latin-1")))
+                    cors_extra.append((b"vary", b"Origin"))
+                message = {**message, "headers": existing + SECURITY_HEADERS + cors_extra}
             await send(message)
 
         async def deny(status: int, code: str, message: str, extra=()):
+            logger.warning(
+                "Dashboard request denied: status=%d, code=%s, method=%s, path=%s, host=%s, origin=%s",
+                status, code, method, path, host_header, origin_raw,
+            )
             body = json.dumps({"error": code, "message": message}).encode()
             await send_secured({"type": "http.response.start", "status": status,
                                 "headers": [(b"content-type", b"application/json"),
                                             (b"content-length", str(len(body)).encode()),
-                                            *extra]})
-            await send_secured({"type": "http.response.body", "body": body})
-
-        method = scope.get("method", "GET").upper()
-        path = scope.get("path", "")
+                                            *extra]}, allow_cors=False)
+            await send_secured({"type": "http.response.body", "body": body}, allow_cors=False)
 
         # 1. Host, before anything else.
         hosts = headers.get("host", [])
         host = parse_host(hosts[0]) if len(hosts) == 1 else None
-        allowed_hosts_env = os.environ.get("HARVEY_ALLOWED_HOSTS", "").strip()
-        allowed_hosts = [h.strip().lower() for h in allowed_hosts_env.split(",") if h.strip()] if allowed_hosts_env else []
-        is_host_allowed = (host is not None) and (
-            is_loopback(host) or
-            ("*" in allowed_hosts) or
-            (host in allowed_hosts) or
-            any(h.startswith("*.") and host.endswith(h[1:]) for h in allowed_hosts)
-        )
-        if not is_host_allowed:
+
+        # Check forwarded host if behind a reverse proxy / tunnel
+        fwd_hosts = headers.get("x-forwarded-host", [])
+        fwd_host = None
+        if fwd_hosts:
+            client_ip = (scope.get("client") or [None])[0]
+            if not client_ip or not is_loopback(client_ip):
+                return await deny(400, "bad_host", "Untrusted proxy connection for X-Forwarded-Host.")
+            if len(fwd_hosts) != 1:
+                return await deny(400, "bad_host", "Multiple X-Forwarded-Host headers are not allowed.")
+            fwd_host = parse_host(fwd_hosts[0])
+            if not fwd_host or not is_host_allowed(fwd_host, allowed_hosts):
+                return await deny(400, "bad_host", "Untrusted X-Forwarded-Host.")
+
+        if not is_host_allowed(host, allowed_hosts):
             return await deny(400, "bad_host",
                               "This dashboard only answers to localhost / 127.0.0.1.")
         host_header = hosts[0].lower()
@@ -359,12 +422,55 @@ class DashboardGuard:
                       and headers.get("sec-fetch-mode", [""])[0] == "navigate"
                       and headers.get("sec-fetch-dest", [""])[0] == "document")
         origins = headers.get("origin", [])
-        if origins and (len(origins) != 1 or origins[0].lower() not in (f"http://{host_header}", f"https://{host_header}")):
-            if not navigation:
+        origin_raw = origins[0].strip() if len(origins) == 1 else None
+
+        if origin_raw:
+            origin_lower = origin_raw.lower()
+            if origin_lower in (f"http://{host_header}", f"https://{host_header}"):
+                origin_is_trusted = True
+            else:
+                try:
+                    split_origin = urlsplit(origin_lower)
+                    origin_scheme = split_origin.scheme
+                    origin_hostname = parse_host(split_origin.netloc)
+                    if origin_scheme in ("http", "https") and origin_hostname:
+                        if fwd_host and origin_hostname == fwd_host:
+                            origin_is_trusted = True
+                        elif not is_loopback(origin_hostname) and is_host_allowed(origin_hostname, allowed_hosts):
+                            origin_is_trusted = True
+                except Exception:
+                    origin_is_trusted = False
+
+        if origins:
+            if (len(origins) != 1 or not origin_is_trusted) and not navigation:
                 return await deny(403, "cross_origin", "Cross-origin requests are refused.")
+
         site = headers.get("sec-fetch-site", [])
-        if site and site[0].lower() not in ("same-origin", "none") and not navigation:
-            return await deny(403, "cross_origin", "Cross-site requests are refused.")
+        if site and not navigation:
+            site_val = site[0].lower()
+            if is_loopback(host) and fwd_host is None:
+                if site_val not in ("same-origin", "none"):
+                    return await deny(403, "cross_origin", "Cross-site requests are refused.")
+            else:
+                if not origin_is_trusted and site_val not in ("same-origin", "none"):
+                    return await deny(403, "cross_origin", "Cross-site requests are refused.")
+
+        # Handle CORS preflight OPTIONS requests for trusted origins
+        if method == "OPTIONS":
+            if origin_is_trusted and origin_raw:
+                cors_headers = [
+                    (b"access-control-allow-methods", b"GET, POST, PUT, PATCH, DELETE, OPTIONS"),
+                    (b"access-control-allow-headers", b"Authorization, Content-Type, Sec-Fetch-Site, Sec-Fetch-Mode, X-Requested-With"),
+                    (b"access-control-max-age", b"86400"),
+                ]
+                await send_secured({
+                    "type": "http.response.start",
+                    "status": 204,
+                    "headers": cors_headers,
+                }, allow_cors=True)
+                await send_secured({"type": "http.response.body", "body": b""}, allow_cors=True)
+                return
+            return await deny(403, "cross_origin", "Cross-origin requests are refused.")
 
         if public:
             return await self.app(scope, receive, send_secured)

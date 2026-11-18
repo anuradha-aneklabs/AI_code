@@ -1735,6 +1735,10 @@ async function loadDiscoverProviders() {
 
         : '') +
 
+      (p.key === 'osm'
+        ? '<div class="row"><span class="k">License</span><span class="v">&copy; <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener noreferrer">OpenStreetMap contributors</a> (<a href="https://opendatacommons.org/licenses/odbl/" target="_blank" rel="noopener noreferrer">ODbL</a>)</span></div>'
+        : '') +
+
       (p.caveat ? '<div class="caveat">' + escHtml(p.caveat) + '</div>' : '') +
 
     '</div>';
@@ -2054,6 +2058,12 @@ function renderDiscoverResult(report, running) {
       stat('Actual cost', report.actual_cost ? '$' + report.actual_cost.toFixed(4) : 'free') +
 
     '</div>' +
+
+    (_provider === 'osm' || (report && report.provider === 'osm')
+      ? '<div class="osm-attribution" style="margin-top:14px;padding:8px 12px;background:var(--surface-2);border-radius:var(--radius-sm);font-size:12px;color:var(--text-muted);">' +
+        'Map data &amp; POIs &copy; <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener noreferrer">OpenStreetMap contributors</a> (<a href="https://opendatacommons.org/licenses/odbl/" target="_blank" rel="noopener noreferrer">ODbL</a>)' +
+        '</div>'
+      : '') +
 
     (report.stopped ? '<div class="test-result error" style="margin-top:14px">' +
 
@@ -6073,6 +6083,13 @@ function renderDiscoveredLeads(leads) {
     const sUrl = l.source_url || (l.domain ? 'https://' + l.domain : '#');
     const sTitle = l.source_title || 'Public Registry / DNS Record';
 
+    const isOsmLead = (l.source_url && l.source_url.includes('openstreetmap.org')) ||
+                      (l.provenance && l.provenance.includes('OpenStreetMap')) ||
+                      (l.provider === 'osm');
+    const osmNote = isOsmLead
+      ? ' &middot; <span class="muted">&copy; <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener noreferrer">OpenStreetMap</a> (<a href="https://opendatacommons.org/licenses/odbl/" target="_blank" rel="noopener noreferrer">ODbL</a>)</span>'
+      : '';
+
     return '<div class="lead-card ' + (l.is_duplicate ? 'is-duplicate' : '') + '" id="lead-card-' + escHtml(l.id) + '">' +
       dupBanner +
       '<div class="lead-card-head">' +
@@ -6121,11 +6138,26 @@ function renderDiscoveredLeads(leads) {
         '<div class="candidate-source-meta">' +
           '<span>Source:</span> <a href="' + safeHref(sUrl) + '" target="_blank" rel="noopener noreferrer">' + escHtml(sTitle) + '</a>' +
           '&middot; <span class="muted">' + relTime(l.research_timestamp || l.created_at) + '</span>' +
+          osmNote +
         '</div>' +
         '<div style="display:flex;gap:6px;align-items:center;">' + actionButtons + '</div>' +
       '</div>' +
     '</div>';
-  }).join('') + '</div>';
+  }).join('');
+
+  const hasOsm = leads.some(l =>
+    (l.source_url && l.source_url.includes('openstreetmap.org')) ||
+    (l.provenance && l.provenance.includes('OpenStreetMap')) ||
+    (l.provider === 'osm')
+  );
+  const osmFooter = hasOsm
+    ? '<div class="osm-attribution-footer" style="margin-top:16px;padding:10px 14px;background:var(--surface-2);border:1px solid var(--line);border-radius:var(--radius-sm);font-size:12px;color:var(--text-muted);display:flex;justify-content:space-between;align-items:center;">' +
+      '<span>📍 Discovered via OpenStreetMap</span>' +
+      '<span>Map data &amp; POIs &copy; <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener noreferrer">OpenStreetMap contributors</a> (<a href="https://opendatacommons.org/licenses/odbl/" target="_blank" rel="noopener noreferrer">ODbL</a>)</span>' +
+      '</div>'
+    : '';
+
+  listEl.innerHTML = '<div class="lead-grid">' + cardsHtml + '</div>' + osmFooter;
 }
 
 async function runSampleLeadDiscovery() {

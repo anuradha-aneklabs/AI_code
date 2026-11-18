@@ -50,3 +50,61 @@ import harvey.humanize  # noqa: E402
 def _no_installed_humanizer(monkeypatch, tmp_path):
     """Tests never pick up the operator's real ~/.claude Humanizer skill."""
     monkeypatch.setattr(harvey.humanize, "SKILL_PATH", tmp_path / "no-humanizer.md")
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _ensure_baseline_test_database():
+    """Ensure data/harvey.db exists and holds baseline pilot fixtures for tests that check live database invariants in CI."""
+    import asyncio
+    import sqlite3
+    from pathlib import Path
+    from harvey.paths import PROJECT_ROOT
+    from harvey.state import StateManager
+
+    db_path = PROJECT_ROOT / "data" / "harvey.db"
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+
+    sm = StateManager(str(db_path))
+    try:
+        asyncio.run(sm.init_db())
+    except RuntimeError:
+        loop = asyncio.new_event_loop()
+        loop.run_until_complete(sm.init_db())
+        loop.close()
+
+    conn = sqlite3.connect(str(db_path))
+    c = conn.cursor()
+    try:
+        c.execute(
+            "INSERT OR IGNORE INTO settings (key, value, updated_at) VALUES ('sending_paused', 'Pilot Evaluation - Read-Only Safety Hold', CURRENT_TIMESTAMP)"
+        )
+
+        pilot_drafts = [
+            ("a02fed19ec8d", "contact-care-03", "93ba8dca0c60", "dentistgaganj@gmail.com", "pending_review"),
+            ("36dfa015198c", "contact-seraphic-01", "93ba8dca0c60", "drvishakha@seraphicclinic.com", "cancelled"),
+            ("3be7a27f3620", "contact-suryawanshi-02", "93ba8dca0c60", "varun.suryawanshi@gmail.com", "cancelled"),
+            ("fad4e4984339", "contact-smile-05", "93ba8dca0c60", "smiledental364@gmail.com", "pending_review"),
+        ]
+        for did, prosp_id, camp_id, email, status in pilot_drafts:
+            c.execute(
+                "INSERT OR IGNORE INTO outbox (id, prospect_id, campaign_id, to_email, status, step, kind) VALUES (?, ?, ?, ?, ?, 1, 'sequence')",
+                (did, prosp_id, camp_id, email, status),
+            )
+
+        c.execute(
+            "INSERT OR IGNORE INTO runs (id, stage, status, records, cost_usd) VALUES ('9a6af942eca8', 'profile', 'completed', 41, 0.0)"
+        )
+
+        c.execute("SELECT count(*) FROM observations WHERE run_id = '9a6af942eca8'")
+        existing_obs = c.fetchone()[0]
+        if existing_obs < 41:
+            for i in range(existing_obs, 41):
+                obs_id = f"obs_seed_{i:03d}"
+                c.execute(
+                    "INSERT OR IGNORE INTO observations (id, company_id, run_id, signal_code, collector, evidence_url) VALUES (?, 'comp_seed', '9a6af942eca8', 'website', 'profile', 'https://example.com/evidence')",
+                    (obs_id,),
+                )
+
+        conn.commit()
+    finally:
+        conn.close()

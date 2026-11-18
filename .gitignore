@@ -15,6 +15,18 @@ dist/
 build/
 .venv/
 venv/
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.mypy_cache/
+.ruff_cache/
+
+# Node / Frontend build artifacts
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
 
 # LinkedIn cookies
 linkedin_cookies.json
@@ -63,3 +75,25 @@ harvey.local.yaml
 # Backups and in-progress writes from `harvey train` hold the same config.
 harvey.local.yaml.*
 harvey.yaml.*
+
+# Generated Demo Media & Client Artifacts
+client_demo_output/
+*.mp4
+*.wav
+*.mkv
+
+# Temporary Reports & Backups
+reports/
+*.bak
+*.bak.*
+requirements.txt.bak
+
+# Logs, PIDs and Locks
+*.log
+*.pid
+*.lock
+
+# Secrets & Local Tokens (defense-in-depth)
+*token*
+!*token*.py
+!test*token*.py

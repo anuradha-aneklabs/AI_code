@@ -1,8 +1,8 @@
 # Harvey AI Sales Agent — Final Project Handover Document
 
-**Date:** November 13, 2026  
-**Project Path:** `C:\Users\aneka\Desktop\harvey`  
-**Reference Repository:** [ethanplusai/harvey](https://github.com/ethanplusai/harvey)  
+**Date:** November 13, 2026
+**Project Path:** `C:\Users\aneka\Desktop\harvey`
+**Reference Repository:** [ethanplusai/harvey](https://github.com/ethanplusai/harvey)
 **Lead Auditor / Engineer:** Antigravity Engineering
 
 ---
@@ -143,4 +143,4 @@ cd C:\Users\aneka\Desktop\harvey
 .\.venv\Scripts\harvey.exe dashboard
 ```
 
-* **Dashboard URL:** `http://127.0.0.1:5555/#token=QwHw6UoT33tIBa9BRuLHnXTXOail1utpKVqpFHk1iZc`
+* **Dashboard URL:** `http://127.0.0.1:5555/#token=REPLACE_WITH_LOCAL_DASHBOARD_TOKEN`
