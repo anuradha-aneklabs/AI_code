@@ -7,11 +7,13 @@ Type=simple
 User=harvey
 Group=harvey
 WorkingDirectory=/opt/harvey
-ExecStart=/opt/harvey/.venv/bin/python -m harvey.cli dashboard --port 5555
+EnvironmentFile=-/opt/harvey/.env
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/opt/harvey/.venv/bin/python -m harvey dashboard --port 5555
 Restart=always
 RestartSec=5
 KillMode=process
-Environment=PYTHONUNBUFFERED=1
+LimitNOFILE=65535
 StandardOutput=journal
 StandardError=journal
 

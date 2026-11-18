@@ -78,6 +78,9 @@ def _ensure_baseline_test_database():
         c.execute(
             "INSERT OR IGNORE INTO settings (key, value, updated_at) VALUES ('sending_paused', 'Pilot Evaluation - Read-Only Safety Hold', CURRENT_TIMESTAMP)"
         )
+        c.execute(
+            "INSERT OR IGNORE INTO signal_codes (code, label, category, status) VALUES ('website', 'Company Website', 'discovery', 'confirmed')"
+        )
 
         pilot_drafts = [
             ("a02fed19ec8d", "contact-care-03", "93ba8dca0c60", "dentistgaganj@gmail.com", "pending_review"),

@@ -6023,7 +6023,7 @@ function renderDiscoveredLeads(leads) {
     return;
   }
 
-  listEl.innerHTML = '<div class="lead-grid">' + leads.map(l => {
+  const cardsHtml = leads.map(l => {
     const tierClass = (l.tier || '').toLowerCase().replace(' ', '-');
     const badgeTone = l.score >= 70 ? 't-good' : (l.score >= 40 ? 't-waiting' : 't-bad');
     const dm = l.decision_maker || {};
