@@ -769,6 +769,93 @@ MIGRATIONS: list[str] = [
     UPDATE business_profiles SET is_default = 0 WHERE id = 'prof_dental_in';
     UPDATE business_profiles SET is_default = 1 WHERE id = 'prof_saas_global';
     """,
+    # ── v25: single-domain research foundation tables ──
+    """
+    CREATE TABLE IF NOT EXISTS research_runs (
+        id TEXT PRIMARY KEY,
+        input_email TEXT NOT NULL,
+        normalized_email TEXT NOT NULL,
+        domain TEXT DEFAULT '',
+        status TEXT DEFAULT 'pending',
+        started_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        finished_at TIMESTAMP,
+        error_summary TEXT DEFAULT ''
+    );
+    CREATE INDEX IF NOT EXISTS idx_research_runs_domain ON research_runs(domain);
+    CREATE INDEX IF NOT EXISTS idx_research_runs_email ON research_runs(normalized_email);
+
+    CREATE TABLE IF NOT EXISTS research_stages (
+        id TEXT PRIMARY KEY,
+        run_id TEXT NOT NULL REFERENCES research_runs(id),
+        stage_name TEXT NOT NULL,
+        status TEXT DEFAULT 'pending',
+        started_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        finished_at TIMESTAMP,
+        error_message TEXT DEFAULT '',
+        details_json TEXT DEFAULT '{}'
+    );
+    CREATE INDEX IF NOT EXISTS idx_research_stages_run_id ON research_stages(run_id);
+    CREATE INDEX IF NOT EXISTS idx_research_stages_name ON research_stages(run_id, stage_name);
+
+    CREATE TABLE IF NOT EXISTS company_websites (
+        id TEXT PRIMARY KEY,
+        run_id TEXT NOT NULL REFERENCES research_runs(id),
+        domain TEXT NOT NULL,
+        candidate_url TEXT DEFAULT '',
+        final_url TEXT DEFAULT '',
+        http_status INTEGER DEFAULT 0,
+        dns_resolved INTEGER DEFAULT 0,
+        verification_status TEXT DEFAULT 'unavailable',
+        confidence REAL DEFAULT 0.0,
+        evidence_text TEXT DEFAULT '',
+        source_method TEXT DEFAULT 'direct_http',
+        checked_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE INDEX IF NOT EXISTS idx_company_websites_run_id ON company_websites(run_id);
+    CREATE INDEX IF NOT EXISTS idx_company_websites_domain ON company_websites(domain);
+
+    CREATE TABLE IF NOT EXISTS source_pages (
+        id TEXT PRIMARY KEY,
+        run_id TEXT NOT NULL REFERENCES research_runs(id),
+        domain TEXT NOT NULL,
+        url TEXT NOT NULL,
+        page_type TEXT DEFAULT 'other',
+        http_status INTEGER DEFAULT 0,
+        content_type TEXT DEFAULT '',
+        fetched_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        content_hash TEXT DEFAULT '',
+        raw_text TEXT DEFAULT '',
+        extraction_status TEXT DEFAULT 'unavailable',
+        error_message TEXT DEFAULT ''
+    );
+    CREATE INDEX IF NOT EXISTS idx_source_pages_run_id ON source_pages(run_id);
+    CREATE INDEX IF NOT EXISTS idx_source_pages_domain ON source_pages(domain);
+    CREATE INDEX IF NOT EXISTS idx_source_pages_url ON source_pages(run_id, url);
+    """,
+    # ── v26: company narrative extraction findings table & raw_html column ──
+    """
+    ALTER TABLE source_pages ADD COLUMN raw_html TEXT DEFAULT '';
+
+    CREATE TABLE IF NOT EXISTS research_findings (
+        id TEXT PRIMARY KEY,
+        run_id TEXT NOT NULL REFERENCES research_runs(id),
+        extraction_run_id TEXT NOT NULL,
+        source_page_id TEXT DEFAULT '',
+        domain TEXT NOT NULL,
+        finding_type TEXT NOT NULL,
+        value_text TEXT DEFAULT '',
+        evidence_text TEXT DEFAULT '',
+        source_url TEXT DEFAULT '',
+        confidence REAL DEFAULT 0.0,
+        verification_status TEXT DEFAULT 'unavailable',
+        extraction_method TEXT DEFAULT 'none',
+        reason TEXT DEFAULT '',
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE INDEX IF NOT EXISTS idx_research_findings_run_id ON research_findings(run_id);
+    CREATE INDEX IF NOT EXISTS idx_research_findings_run_type ON research_findings(run_id, finding_type);
+    CREATE INDEX IF NOT EXISTS idx_research_findings_ext_run ON research_findings(extraction_run_id);
+    """,
 ]
 
 CRM_PIPELINE_STAGES: list[str] = [
@@ -4891,4 +4978,317 @@ class StateManager:
                 if row:
                     return dict(row)
         return None
+
+    # ── Single-Domain Research Foundation (v25) ──
+
+    async def save_research_run(
+        self,
+        *,
+        run_id: str,
+        input_email: str,
+        normalized_email: str,
+        domain: str = "",
+        status: str = "pending",
+        started_at: str | None = None,
+        finished_at: str | None = None,
+        error_summary: str = "",
+    ) -> str:
+        """Create or update a research run."""
+        started = started_at or _utcnow().isoformat()
+        async with self._connect() as db:
+            await db.execute(
+                """
+                INSERT INTO research_runs (
+                    id, input_email, normalized_email, domain, status, started_at, finished_at, error_summary
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET
+                    status = excluded.status,
+                    domain = CASE WHEN excluded.domain != '' THEN excluded.domain ELSE research_runs.domain END,
+                    finished_at = excluded.finished_at,
+                    error_summary = excluded.error_summary
+                """,
+                (run_id, input_email, normalized_email, domain, status, started, finished_at, error_summary),
+            )
+            await db.commit()
+        return run_id
+
+    async def update_research_run(self, run_id: str, **kwargs) -> bool:
+        """Update specific fields of a research run."""
+        allowed = {"status", "domain", "finished_at", "error_summary"}
+        updates = {k: v for k, v in kwargs.items() if k in allowed}
+        if not updates:
+            return False
+        set_clauses = [f"{k} = ?" for k in updates]
+        params = list(updates.values()) + [run_id]
+        async with self._connect() as db:
+            await db.execute(
+                f"UPDATE research_runs SET {', '.join(set_clauses)} WHERE id = ?",
+                params,
+            )
+            await db.commit()
+        return True
+
+    async def get_research_run(self, run_id: str) -> dict[str, Any] | None:
+        """Fetch a single research run by id."""
+        async with self._connect() as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute("SELECT * FROM research_runs WHERE id = ?", (run_id,)) as cur:
+                row = await cur.fetchone()
+                return dict(row) if row else None
+
+    async def save_research_stage(
+        self,
+        *,
+        stage_id: str,
+        run_id: str,
+        stage_name: str,
+        status: str = "pending",
+        started_at: str | None = None,
+        finished_at: str | None = None,
+        error_message: str = "",
+        details_json: str = "{}",
+    ) -> str:
+        """Record or update a stage execution for a run."""
+        started = started_at or _utcnow().isoformat()
+        async with self._connect() as db:
+            await db.execute(
+                """
+                INSERT INTO research_stages (
+                    id, run_id, stage_name, status, started_at, finished_at, error_message, details_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET
+                    status = excluded.status,
+                    finished_at = excluded.finished_at,
+                    error_message = excluded.error_message,
+                    details_json = excluded.details_json
+                """,
+                (stage_id, run_id, stage_name, status, started, finished_at, error_message, details_json),
+            )
+            await db.commit()
+        return stage_id
+
+    async def get_research_stages(self, run_id: str) -> list[dict[str, Any]]:
+        """Fetch all stages for a run, ordered by started_at."""
+        async with self._connect() as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(
+                "SELECT * FROM research_stages WHERE run_id = ? ORDER BY started_at ASC",
+                (run_id,),
+            ) as cur:
+                rows = await cur.fetchall()
+                return [dict(r) for r in rows]
+
+    async def save_company_website(
+        self,
+        *,
+        website_id: str,
+        run_id: str,
+        domain: str,
+        candidate_url: str = "",
+        final_url: str = "",
+        http_status: int = 0,
+        dns_resolved: bool = False,
+        verification_status: str = "unavailable",
+        confidence: float = 0.0,
+        evidence_text: str = "",
+        source_method: str = "direct_http",
+        checked_at: str | None = None,
+    ) -> str:
+        """Persist website verification results."""
+        checked = checked_at or _utcnow().isoformat()
+        async with self._connect() as db:
+            await db.execute(
+                """
+                INSERT INTO company_websites (
+                    id, run_id, domain, candidate_url, final_url, http_status,
+                    dns_resolved, verification_status, confidence, evidence_text,
+                    source_method, checked_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET
+                    candidate_url = excluded.candidate_url,
+                    final_url = excluded.final_url,
+                    http_status = excluded.http_status,
+                    dns_resolved = excluded.dns_resolved,
+                    verification_status = excluded.verification_status,
+                    confidence = excluded.confidence,
+                    evidence_text = excluded.evidence_text,
+                    checked_at = excluded.checked_at
+                """,
+                (
+                    website_id, run_id, domain, candidate_url, final_url, http_status,
+                    1 if dns_resolved else 0, verification_status, float(confidence),
+                    evidence_text, source_method, checked,
+                ),
+            )
+            await db.commit()
+        return website_id
+
+    async def get_company_website(self, run_id: str) -> dict[str, Any] | None:
+        """Fetch company website record for a run."""
+        async with self._connect() as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(
+                "SELECT * FROM company_websites WHERE run_id = ?", (run_id,)
+            ) as cur:
+                row = await cur.fetchone()
+                return dict(row) if row else None
+
+    async def save_source_page(
+        self,
+        *,
+        page_id: str,
+        run_id: str,
+        domain: str,
+        url: str,
+        page_type: str = "other",
+        http_status: int = 0,
+        content_type: str = "",
+        fetched_at: str | None = None,
+        content_hash: str = "",
+        raw_text: str = "",
+        raw_html: str = "",
+        extraction_status: str = "unavailable",
+        error_message: str = "",
+    ) -> str:
+        """Persist a discovered/fetched source page."""
+        fetched = fetched_at or _utcnow().isoformat()
+        async with self._connect() as db:
+            await db.execute(
+                """
+                INSERT INTO source_pages (
+                    id, run_id, domain, url, page_type, http_status, content_type,
+                    fetched_at, content_hash, raw_text, raw_html, extraction_status, error_message
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET
+                    http_status = excluded.http_status,
+                    content_type = excluded.content_type,
+                    fetched_at = excluded.fetched_at,
+                    content_hash = excluded.content_hash,
+                    raw_text = excluded.raw_text,
+                    raw_html = excluded.raw_html,
+                    extraction_status = excluded.extraction_status,
+                    error_message = excluded.error_message
+                """,
+                (
+                    page_id, run_id, domain, url, page_type, http_status, content_type,
+                    fetched, content_hash, raw_text, raw_html, extraction_status, error_message,
+                ),
+            )
+            await db.commit()
+        return page_id
+
+    async def get_source_pages(self, run_id: str) -> list[dict[str, Any]]:
+        """Fetch all source pages for a run."""
+        async with self._connect() as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(
+                "SELECT * FROM source_pages WHERE run_id = ? ORDER BY fetched_at ASC",
+                (run_id,),
+            ) as cur:
+                rows = await cur.fetchall()
+                return [dict(r) for r in rows]
+
+    async def save_research_finding(
+        self,
+        *,
+        finding_id: str,
+        run_id: str,
+        extraction_run_id: str,
+        source_page_id: str = "",
+        domain: str,
+        finding_type: str,
+        value_text: str = "",
+        evidence_text: str = "",
+        source_url: str = "",
+        confidence: float = 0.0,
+        verification_status: str = "unavailable",
+        extraction_method: str = "none",
+        reason: str = "",
+        created_at: str | None = None,
+    ) -> str:
+        """Persist a single narrative finding."""
+        created = created_at or _utcnow().isoformat()
+        async with self._connect() as db:
+            await db.execute(
+                """
+                INSERT INTO research_findings (
+                    id, run_id, extraction_run_id, source_page_id, domain,
+                    finding_type, value_text, evidence_text, source_url,
+                    confidence, verification_status, extraction_method, reason, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    finding_id, run_id, extraction_run_id, source_page_id, domain,
+                    finding_type, value_text, evidence_text, source_url,
+                    float(confidence), verification_status, extraction_method, reason, created,
+                ),
+            )
+            await db.commit()
+        return finding_id
+
+    async def get_research_findings(
+        self,
+        run_id: str,
+        extraction_run_id: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """Fetch research findings for a run.
+        
+        If extraction_run_id is None, returns findings from the latest extraction run.
+        """
+        async with self._connect() as db:
+            db.row_factory = aiosqlite.Row
+            if extraction_run_id:
+                async with db.execute(
+                    """
+                    SELECT * FROM research_findings
+                    WHERE run_id = ? AND extraction_run_id = ?
+                    ORDER BY created_at ASC, id ASC
+                    """,
+                    (run_id, extraction_run_id),
+                ) as cur:
+                    rows = await cur.fetchall()
+                    return [dict(r) for r in rows]
+            else:
+                async with db.execute(
+                    """
+                    SELECT extraction_run_id FROM research_findings
+                    WHERE run_id = ?
+                    ORDER BY created_at DESC, id DESC LIMIT 1
+                    """,
+                    (run_id,),
+                ) as cur:
+                    row = await cur.fetchone()
+                    if not row:
+                        return []
+                    latest_id = row[0]
+
+                async with db.execute(
+                    """
+                    SELECT * FROM research_findings
+                    WHERE run_id = ? AND extraction_run_id = ?
+                    ORDER BY created_at ASC, id ASC
+                    """,
+                    (run_id, latest_id),
+                ) as cur:
+                    rows = await cur.fetchall()
+                    return [dict(r) for r in rows]
+
+    async def get_research_run_full(self, run_id: str) -> dict[str, Any] | None:
+        """Retrieve complete run aggregate including stages, website, pages, and findings."""
+        run = await self.get_research_run(run_id)
+        if not run:
+            return None
+        stages = await self.get_research_stages(run_id)
+        website = await self.get_company_website(run_id)
+        pages = await self.get_source_pages(run_id)
+        findings = await self.get_research_findings(run_id)
+        return {
+            **run,
+            "stages": {s["stage_name"]: s for s in stages},
+            "stages_list": stages,
+            "website": website,
+            "pages": pages,
+            "findings": findings,
+        }
+
 

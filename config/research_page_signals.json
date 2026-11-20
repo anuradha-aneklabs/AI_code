@@ -1,0 +1,50 @@
+{
+  "about_signals": [
+    "about",
+    "about-us",
+    "company",
+    "who-we-are",
+    "our-story"
+  ],
+  "team_signals": [
+    "team",
+    "our-team",
+    "leadership",
+    "management",
+    "management-team",
+    "people",
+    "board",
+    "founders"
+  ],
+  "services_signals": [
+    "services",
+    "products",
+    "solutions",
+    "what-we-do",
+    "offerings",
+    "platform"
+  ],
+  "contact_signals": [
+    "contact",
+    "contact-us"
+  ],
+  "exclude_segments": [
+    "customers",
+    "customer-stories",
+    "case-studies",
+    "guides",
+    "blog",
+    "news",
+    "press",
+    "resources",
+    "docs",
+    "pricing",
+    "careers",
+    "jobs",
+    "legal",
+    "privacy",
+    "terms",
+    "support",
+    "help"
+  ]
+}

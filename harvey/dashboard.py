@@ -533,6 +533,56 @@ async def api_db_backup(request: Request):
         return JSONResponse({"success": False, "error": str(e)}, status_code=500)
 
 
+@app.post("/api/research/run")
+async def api_start_single_domain_research(request: Request):
+    """Start single-domain research foundation run for an email."""
+    try:
+        data = await request.json() if request.headers.get("content-type") == "application/json" else {}
+        email = str(data.get("email") or "").strip()
+        if not email:
+            return JSONResponse({"success": False, "error": "Email is required"}, status_code=400)
+
+        from harvey.single_domain_research import run_single_email_research
+        state = _state()
+        res = await run_single_email_research(email, state=state)
+        return {"success": True, "run": res}
+    except Exception as e:
+        logger.exception("Single-domain research run failed")
+        return JSONResponse({"success": False, "error": str(e)}, status_code=500)
+
+
+@app.get("/api/research/run/{run_id}")
+async def api_get_single_domain_research_run(run_id: str):
+    """Retrieve full single-domain research run details by id."""
+    try:
+        state = _state()
+        await state.init_db()
+        run = await state.get_research_run_full(run_id)
+        if not run:
+            return JSONResponse({"success": False, "error": f"Research run '{run_id}' not found"}, status_code=404)
+        return {"success": True, "run": run}
+    except Exception as e:
+        logger.exception("Failed to get research run %s", run_id)
+        return JSONResponse({"success": False, "error": str(e)}, status_code=500)
+
+
+@app.post("/api/research/run/{run_id}/extract")
+async def api_extract_company_narrative(run_id: str, request: Request):
+    """Trigger company narrative extraction for an existing research run."""
+    try:
+        from harvey.company_narrative import extract_company_narrative
+        state = _state()
+        await state.init_db()
+        run = await state.get_research_run(run_id)
+        if not run:
+            return JSONResponse({"success": False, "error": f"Research run '{run_id}' not found"}, status_code=404)
+        findings = await extract_company_narrative(run_id, state=state)
+        return {"success": True, "run_id": run_id, "findings": findings}
+    except Exception as e:
+        logger.exception("Company narrative extraction failed for run %s", run_id)
+        return JSONResponse({"success": False, "error": str(e)}, status_code=500)
+
+
 @app.post("/api/trulyinbox/connect")
 async def trulyinbox_connect(request: Request):
     """Check a TrulyInbox key against the sending mailbox, then save it to .env."""
