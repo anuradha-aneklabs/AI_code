@@ -15,6 +15,7 @@ import uuid
 from collections.abc import Awaitable, Callable
 from contextlib import asynccontextmanager
 from datetime import datetime, date, timedelta, timezone
+import os
 from pathlib import Path
 
 import aiosqlite
@@ -25,10 +26,10 @@ from harvey.qualification import parse_location_components
 from harvey.models.campaign import Campaign, EmailStep  # noqa: F401 (EmailStep re-exported)
 from harvey.models.conversation import Conversation, Message  # noqa: F401
 
-from harvey.paths import PROJECT_ROOT
+from harvey.paths import _REAL_PROJECT_ROOT, PROJECT_ROOT, get_db_path
 from harvey.startups import parse_funding
 
-DB_PATH = PROJECT_ROOT / "data" / "harvey.db"
+DB_PATH = get_db_path()
 
 # How long (seconds) a connection waits on a locked database before failing.
 BUSY_TIMEOUT_SECONDS = 30.0
@@ -856,6 +857,54 @@ MIGRATIONS: list[str] = [
     CREATE INDEX IF NOT EXISTS idx_research_findings_run_type ON research_findings(run_id, finding_type);
     CREATE INDEX IF NOT EXISTS idx_research_findings_ext_run ON research_findings(extraction_run_id);
     """,
+    # ── v27: decision-maker discovery research_people table ──
+    """
+    CREATE TABLE IF NOT EXISTS research_people (
+        id TEXT PRIMARY KEY,
+        run_id TEXT NOT NULL REFERENCES research_runs(id),
+        extraction_run_id TEXT NOT NULL,
+        source_page_id TEXT DEFAULT '',
+        domain TEXT NOT NULL,
+        full_name TEXT NOT NULL,
+        title TEXT DEFAULT '',
+        role_category TEXT NOT NULL,
+        source_url TEXT DEFAULT '',
+        evidence_text TEXT DEFAULT '',
+        confidence REAL DEFAULT 0.0,
+        verification_status TEXT DEFAULT 'unavailable',
+        extraction_method TEXT DEFAULT 'none',
+        also_seen_urls_json TEXT DEFAULT '[]',
+        reason TEXT DEFAULT '',
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE INDEX IF NOT EXISTS idx_research_people_run_id ON research_people(run_id);
+    CREATE INDEX IF NOT EXISTS idx_research_people_role ON research_people(run_id, role_category);
+    CREATE INDEX IF NOT EXISTS idx_research_people_ext_run ON research_people(extraction_run_id);
+    """,
+    # ── v28: discovery results provenance and company location verification ──
+    """
+    ALTER TABLE companies ADD COLUMN result_class TEXT DEFAULT 'company_homepage';
+    ALTER TABLE companies ADD COLUMN location_status TEXT DEFAULT 'location_unverified';
+    ALTER TABLE companies ADD COLUMN location_evidence TEXT DEFAULT '';
+    ALTER TABLE companies ADD COLUMN location_evidence_url TEXT DEFAULT '';
+
+    CREATE TABLE IF NOT EXISTS discovery_results (
+        id TEXT PRIMARY KEY,
+        run_id TEXT NOT NULL,
+        query TEXT DEFAULT '',
+        title TEXT DEFAULT '',
+        url TEXT NOT NULL,
+        domain TEXT DEFAULT '',
+        result_class TEXT NOT NULL,
+        reason TEXT DEFAULT '',
+        location_status TEXT DEFAULT 'location_unverified',
+        location_evidence TEXT DEFAULT '',
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE INDEX IF NOT EXISTS idx_discovery_results_run_id ON discovery_results(run_id);
+    CREATE INDEX IF NOT EXISTS idx_discovery_results_domain ON discovery_results(domain);
+    CREATE INDEX IF NOT EXISTS idx_discovery_results_class ON discovery_results(result_class);
+    """,
 ]
 
 CRM_PIPELINE_STAGES: list[str] = [
@@ -899,7 +948,28 @@ _CONVERSATION_COLUMNS = frozenset({
 
 class StateManager:
     def __init__(self, db_path: str | None = None):
-        self.db_path = db_path or str(DB_PATH)
+        override = os.environ.get("HARVEY_DB_PATH")
+        if override and override.strip():
+            resolved_override = Path(override.strip()).resolve()
+            real_default = (_REAL_PROJECT_ROOT / "data" / "harvey.db").resolve()
+            if not db_path:
+                self.db_path = str(resolved_override)
+                print(f"[DB] Using database override: {self.db_path}")
+            else:
+                try:
+                    given = Path(db_path).resolve()
+                    if given == real_default or given == resolved_override:
+                        self.db_path = str(resolved_override)
+                        print(f"[DB] Using database override: {self.db_path}")
+                    else:
+                        self.db_path = str(db_path)
+                except Exception:
+                    self.db_path = str(db_path)
+        else:
+            if db_path:
+                self.db_path = str(db_path)
+            else:
+                self.db_path = str(get_db_path())
 
     @asynccontextmanager
     async def _connect(self):
@@ -1006,24 +1076,49 @@ class StateManager:
         if not company.id:
             company.id = _new_id()
         company.domain = _norm(company.domain)
+        res_class = getattr(company, "result_class", "company_homepage") or "company_homepage"
+        loc_status = getattr(company, "location_status", "location_unverified") or "location_unverified"
+        loc_ev = getattr(company, "location_evidence", "") or ""
+        loc_ev_url = getattr(company, "location_evidence_url", "") or ""
         async with self._connect() as db:
-            cursor = await db.execute(
-                """INSERT OR IGNORE INTO companies
-                   (id, name, domain, website, description, industry,
-                    company_size, location, phone, source, source_url,
-                    external_id, notes, tech_stack_json, signals_json,
-                    created_at, updated_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                (
-                    company.id, company.name, company.domain, company.website,
-                    company.description, company.industry, company.company_size,
-                    company.location, company.phone, company.source,
-                    company.source_url, company.external_id, company.notes,
-                    json.dumps(company.tech_stack), json.dumps(company.signals),
-                    company.created_at.isoformat(),
-                    company.updated_at.isoformat(),
-                ),
-            )
+            try:
+                cursor = await db.execute(
+                    """INSERT OR IGNORE INTO companies
+                       (id, name, domain, website, description, industry,
+                        company_size, location, phone, source, source_url,
+                        external_id, notes, tech_stack_json, signals_json,
+                        created_at, updated_at, result_class, location_status,
+                        location_evidence, location_evidence_url)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (
+                        company.id, company.name, company.domain, company.website,
+                        company.description, company.industry, company.company_size,
+                        company.location, company.phone, company.source,
+                        company.source_url, company.external_id, company.notes,
+                        json.dumps(company.tech_stack), json.dumps(company.signals),
+                        company.created_at.isoformat(),
+                        company.updated_at.isoformat(),
+                        res_class, loc_status, loc_ev, loc_ev_url,
+                    ),
+                )
+            except Exception:
+                cursor = await db.execute(
+                    """INSERT OR IGNORE INTO companies
+                       (id, name, domain, website, description, industry,
+                        company_size, location, phone, source, source_url,
+                        external_id, notes, tech_stack_json, signals_json,
+                        created_at, updated_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (
+                        company.id, company.name, company.domain, company.website,
+                        company.description, company.industry, company.company_size,
+                        company.location, company.phone, company.source,
+                        company.source_url, company.external_id, company.notes,
+                        json.dumps(company.tech_stack), json.dumps(company.signals),
+                        company.created_at.isoformat(),
+                        company.updated_at.isoformat(),
+                    ),
+                )
             await db.commit()
             if cursor.rowcount == 0:
                 # Uniqueness conflict: hand back the existing record's id.
@@ -3801,7 +3896,7 @@ class StateManager:
         reasons_json = json.dumps(lead_data.get("reasons") or [])
         confidence = float(lead_data.get("confidence") or 0.0)
         is_qualified = 1 if lead_data.get("is_qualified") else 0
-        is_sample = 1 if lead_data.get("is_sample", True) else 0
+        is_sample = 1 if lead_data.get("is_sample", False) else 0
         bant_breakdown_json = json.dumps(lead_data.get("bant_breakdown") or {})
 
         async with self._connect() as db:
@@ -3848,6 +3943,7 @@ class StateManager:
                     reasons_json=excluded.reasons_json,
                     confidence=excluded.confidence,
                     is_qualified=excluded.is_qualified,
+                    is_sample=excluded.is_sample,
                     bant_breakdown_json=excluded.bant_breakdown_json,
                     updated_at=CURRENT_TIMESTAMP""",
                 (lid, profile_id, company_name, domain, website, industry, location,
@@ -3859,16 +3955,24 @@ class StateManager:
             await db.commit()
         return lid
 
-    async def get_discovered_leads(self, profile_id: str | None = None) -> list[dict]:
+    async def get_discovered_leads(
+        self, profile_id: str | None = None, include_sample: bool = True
+    ) -> list[dict]:
         async with self._connect() as db:
             db.row_factory = aiosqlite.Row
-            query = "SELECT * FROM discovered_leads"
-            params: tuple = ()
+            where_clauses = []
+            params: list[Any] = []
             if profile_id:
-                query += " WHERE profile_id = ?"
-                params = (profile_id,)
+                where_clauses.append("profile_id = ?")
+                params.append(profile_id)
+            if not include_sample:
+                where_clauses.append("(is_sample = 0 OR is_sample IS NULL)")
+
+            query = "SELECT * FROM discovered_leads"
+            if where_clauses:
+                query += " WHERE " + " AND ".join(where_clauses)
             query += " ORDER BY score DESC, created_at DESC"
-            async with db.execute(query, params) as cursor:
+            async with db.execute(query, tuple(params)) as cursor:
                 rows = await cursor.fetchall()
                 out = []
                 seen_domains = set()
@@ -5273,8 +5377,97 @@ class StateManager:
                     rows = await cur.fetchall()
                     return [dict(r) for r in rows]
 
+    async def save_research_person(
+        self,
+        *,
+        person_id: str,
+        run_id: str,
+        extraction_run_id: str,
+        source_page_id: str = "",
+        domain: str,
+        full_name: str,
+        title: str = "",
+        role_category: str = "other_leadership",
+        source_url: str = "",
+        evidence_text: str = "",
+        confidence: float = 0.0,
+        verification_status: str = "unavailable",
+        extraction_method: str = "none",
+        also_seen_urls_json: str = "[]",
+        reason: str = "",
+        created_at: str | None = None,
+    ) -> str:
+        """Persist a single decision maker finding."""
+        created = created_at or _utcnow().isoformat()
+        async with self._connect() as db:
+            await db.execute(
+                """
+                INSERT INTO research_people (
+                    id, run_id, extraction_run_id, source_page_id, domain,
+                    full_name, title, role_category, source_url, evidence_text,
+                    confidence, verification_status, extraction_method,
+                    also_seen_urls_json, reason, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    person_id, run_id, extraction_run_id, source_page_id, domain,
+                    full_name, title, role_category, source_url, evidence_text,
+                    float(confidence), verification_status, extraction_method,
+                    also_seen_urls_json, reason, created,
+                ),
+            )
+            await db.commit()
+        return person_id
+
+    async def get_research_people(
+        self,
+        run_id: str,
+        extraction_run_id: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """Fetch research decision makers for a run.
+        
+        If extraction_run_id is None, returns decision makers from the latest extraction run.
+        """
+        async with self._connect() as db:
+            db.row_factory = aiosqlite.Row
+            if extraction_run_id:
+                async with db.execute(
+                    """
+                    SELECT * FROM research_people
+                    WHERE run_id = ? AND extraction_run_id = ?
+                    ORDER BY created_at ASC, id ASC
+                    """,
+                    (run_id, extraction_run_id),
+                ) as cur:
+                    rows = await cur.fetchall()
+                    return [dict(r) for r in rows]
+            else:
+                async with db.execute(
+                    """
+                    SELECT extraction_run_id FROM research_people
+                    WHERE run_id = ?
+                    ORDER BY created_at DESC, id DESC LIMIT 1
+                    """,
+                    (run_id,),
+                ) as cur:
+                    row = await cur.fetchone()
+                    if not row:
+                        return []
+                    latest_id = row[0]
+
+                async with db.execute(
+                    """
+                    SELECT * FROM research_people
+                    WHERE run_id = ? AND extraction_run_id = ?
+                    ORDER BY created_at ASC, id ASC
+                    """,
+                    (run_id, latest_id),
+                ) as cur:
+                    rows = await cur.fetchall()
+                    return [dict(r) for r in rows]
+
     async def get_research_run_full(self, run_id: str) -> dict[str, Any] | None:
-        """Retrieve complete run aggregate including stages, website, pages, and findings."""
+        """Retrieve complete run aggregate including stages, website, pages, findings, and people."""
         run = await self.get_research_run(run_id)
         if not run:
             return None
@@ -5282,6 +5475,7 @@ class StateManager:
         website = await self.get_company_website(run_id)
         pages = await self.get_source_pages(run_id)
         findings = await self.get_research_findings(run_id)
+        people = await self.get_research_people(run_id)
         return {
             **run,
             "stages": {s["stage_name"]: s for s in stages},
@@ -5289,6 +5483,68 @@ class StateManager:
             "website": website,
             "pages": pages,
             "findings": findings,
+            "people": people,
         }
+
+    async def save_discovery_result(
+        self,
+        *,
+        run_id: str,
+        query: str,
+        title: str,
+        url: str,
+        domain: str,
+        result_class: str,
+        reason: str,
+        location_status: str = "location_unverified",
+        location_evidence: str = "",
+    ) -> str:
+        """Persist a raw discovery search result with its classification and reason."""
+        res_id = _new_id()
+        async with self._connect() as db:
+            await db.execute(
+                """
+                INSERT INTO discovery_results
+                (id, run_id, query, title, url, domain, result_class, reason, location_status, location_evidence)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (res_id, run_id, query, title, url, domain, result_class, reason, location_status, location_evidence),
+            )
+            await db.commit()
+        return res_id
+
+    async def get_discovery_results(self, run_id: str | None = None) -> list[dict[str, Any]]:
+        """Retrieve discovery results, optionally filtered by run_id."""
+        async with self._connect() as db:
+            db.row_factory = aiosqlite.Row
+            if run_id:
+                query = "SELECT * FROM discovery_results WHERE run_id = ? ORDER BY created_at ASC"
+                params = (run_id,)
+            else:
+                query = "SELECT * FROM discovery_results ORDER BY created_at DESC"
+                params = ()
+            async with db.execute(query, params) as cur:
+                rows = await cur.fetchall()
+                return [dict(r) for r in rows]
+
+    async def update_company_location_evidence(
+        self,
+        company_id: str,
+        location_status: str,
+        location_evidence: str = "",
+        location_evidence_url: str = "",
+    ) -> None:
+        """Update a company's location verification status and evidence."""
+        async with self._connect() as db:
+            await db.execute(
+                """
+                UPDATE companies
+                SET location_status = ?, location_evidence = ?, location_evidence_url = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (location_status, location_evidence, location_evidence_url, _utcnow().isoformat(), company_id),
+            )
+            await db.commit()
+
 
 

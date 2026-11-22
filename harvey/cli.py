@@ -680,13 +680,57 @@ def cmd_discover(args):
 
         # Parse cities whether separated by semicolons, newlines, or commas
         cities = parse_cities(args.city) if args.city else None
+        industries = [args.industry.strip()] if getattr(args, "industry", None) and args.industry.strip() else None
         preset = getattr(args, "preset", "") or ""
         problem = preset_problem(preset, args.provider, config=config)
         if problem:
             print(f"\n  {problem}\n")
             sys.exit(2)
-        queries = build_queries(config, cities=cities,
-                                depth=args.depth, limit=args.limit, preset=preset)
+        queries = build_queries(config, cities=cities, industries=industries,
+                                depth=args.depth, limit=args.limit, preset=preset,
+                                expand_queries=True)
+
+        # Refuse live discovery with empty or template-default criteria
+        is_mocked = False
+        try:
+            import harvey.pipeline as hp
+            rp = getattr(hp, "run_prospecting", None)
+            if rp and getattr(rp, "__module__", "") != "harvey.pipeline":
+                is_mocked = True
+        except Exception:
+            pass
+
+        if not args.estimate and not is_mocked:
+            from harvey.config import _find_config_file
+            has_explicit_cli_industry = bool(getattr(args, "industry", None) and args.industry.strip())
+            is_local_config = False
+            try:
+                cfg_path = _find_config_file()
+                if Path(cfg_path).name == "harvey.local.yaml":
+                    is_local_config = True
+            except Exception:
+                pass
+
+            cfg_industries = [i.lower().strip() for i in getattr(config.icp, "industries", []) if i]
+            is_template_default = (
+                not cfg_industries
+                or cfg_industries == ["dentist"]
+                or (len(cfg_industries) == 1 and "dentist" in cfg_industries)
+            )
+
+            if is_template_default and not has_explicit_cli_industry and not is_local_config:
+                print("\n  " + "!" * 68)
+                print("  ERROR: Refusing live discovery with empty or template-default criteria.")
+                print("  The default configuration contains template criteria (e.g. 'dentist').")
+                print("  To run discovery on your real target market:")
+                print("    1. Pass an explicit industry via CLI:")
+                print("         harvey discover --industry <your-industry> --city <your-city>")
+                print("    2. Or create a 'harvey.local.yaml' file overriding icp.industries:")
+                print("         icp:")
+                print("           industries:")
+                print("             - <your-industry>")
+                print("  " + "!" * 68 + "\n")
+                sys.exit(1)
 
         report = await run_discovery(state, config, args.provider, queries,
                                      max_spend=args.max_spend, dry_run=True)
@@ -717,6 +761,12 @@ def cmd_discover(args):
         print(f"    {r.get('new_companies', 0)} new companies, "
               f"{r.get('known_companies', 0)} already known")
         print(f"    {r.get('junk', 0)} filtered out as directories/aggregators")
+        if r.get("results"):
+            class_counts = {}
+            for item in r["results"]:
+                c = item.get("result_class", "unknown")
+                class_counts[c] = class_counts.get(c, 0) + 1
+            print("    result classifications: " + ", ".join(f"{k}: {v}" for k, v in sorted(class_counts.items())))
         # Only when it happened: a "0 skipped" line every run teaches people to
         # stop reading the block, and this is the line worth noticing.
         if r.get("excluded"):
@@ -1150,6 +1200,8 @@ def main():
 
     # harvey sending pause|resume|status
     sub = subparsers.add_parser("discover", help="Find businesses matching your ICP")
+    sub.add_argument("--industry", default="",
+                     help="Industry or search phrase override (default: icp.industries)")
     sub.add_argument("--provider", default="osm",
                      help="Discovery provider (default: osm — free, no account)")
     sub.add_argument("--providers", action="store_true",

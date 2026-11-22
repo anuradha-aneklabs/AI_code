@@ -27,6 +27,10 @@ class Company(BaseModel):
     # best prospects for anyone selling one.
     external_id: str = ""
     notes: str = ""
+    result_class: str = "company_homepage"
+    location_status: str = "location_unverified"
+    location_evidence: str = ""
+    location_evidence_url: str = ""
     # Buying signals: detected tools on their site, and timely triggers
     # (hiring, funding, ...) as [{"type": ..., "detail": ..., "found_at": ...}]
     tech_stack: list[str] = Field(default_factory=list)

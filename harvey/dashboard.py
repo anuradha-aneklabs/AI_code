@@ -27,10 +27,10 @@ from fastapi.responses import (
 logger = logging.getLogger("harvey.dashboard")
 
 from harvey import dashboard_auth as auth  # noqa: E402
-from harvey.paths import PROJECT_ROOT  # noqa: E402
+from harvey.paths import PROJECT_ROOT, get_db_path  # noqa: E402
 from harvey.pidfile import LOCK_FILE, loop_lock_held, pid_alive  # noqa: E402
 from harvey.textio import read_user_text  # noqa: E402
-DB_PATH = PROJECT_ROOT / "data" / "harvey.db"
+DB_PATH = get_db_path()
 ENV_FILE = PROJECT_ROOT / ".env"
 CONFIG_FILE = PROJECT_ROOT / "harvey.yaml"
 PID_FILE = PROJECT_ROOT / "data" / "harvey.pid"
@@ -580,6 +580,23 @@ async def api_extract_company_narrative(run_id: str, request: Request):
         return {"success": True, "run_id": run_id, "findings": findings}
     except Exception as e:
         logger.exception("Company narrative extraction failed for run %s", run_id)
+        return JSONResponse({"success": False, "error": str(e)}, status_code=500)
+
+
+@app.post("/api/research/run/{run_id}/people")
+async def api_find_decision_makers(run_id: str, request: Request):
+    """Trigger decision maker discovery for an existing research run."""
+    try:
+        from harvey.decision_makers import find_decision_makers
+        state = _state()
+        await state.init_db()
+        run = await state.get_research_run(run_id)
+        if not run:
+            return JSONResponse({"success": False, "error": f"Research run '{run_id}' not found"}, status_code=404)
+        people = await find_decision_makers(run_id, state=state)
+        return {"success": True, "run_id": run_id, "people": people}
+    except Exception as e:
+        logger.exception("Decision maker discovery failed for run %s", run_id)
         return JSONResponse({"success": False, "error": str(e)}, status_code=500)
 
 
@@ -2229,9 +2246,12 @@ def _discovery_queries(body: dict, config):
     if problem:
         raise ValueError(problem)
     raw_cities = [c.strip() for c in (body.get("cities") or []) if c.strip()]
+    if not raw_cities and body.get("city"):
+        raw_cities = [body["city"]]
     cities = parse_cities(raw_cities) or None
+    raw_industries = [body["industry"].strip()] if body.get("industry") else ([i.strip() for i in body.get("industries", [])] if body.get("industries") else None)
     return build_queries(
-        config, cities=cities,
+        config, cities=cities, industries=raw_industries,
         depth=int(body.get("depth") or 30),
         limit=int(body.get("limit") or 100),
         preset=preset,
@@ -2551,14 +2571,19 @@ async def get_discovered_leads(
     profile_id: str | None = None,
     status: str = "all",
     search: str | None = None,
+    include_sample: bool = False,
+    demo_mode: bool = False,
 ):
-    """Retrieve discovered candidate leads with duplicate detection and review status."""
+    """Retrieve discovered candidate leads with duplicate detection and review status.
+    Excludes is_sample=1 rows from real lists and counts unless explicitly requested.
+    """
     try:
         from harvey.qualification import check_discovered_lead_duplicates
 
         state = _state()
         await state.init_db()
-        leads = await state.get_discovered_leads(profile_id)
+        show_sample = bool(include_sample or demo_mode)
+        leads = await state.get_discovered_leads(profile_id, include_sample=show_sample)
 
         # Check CRM duplicate status for each lead
         leads = await check_discovered_lead_duplicates(leads, state)
@@ -2590,7 +2615,7 @@ async def get_discovered_leads(
                 except Exception:
                     pass
 
-        # Compute accurate counts over ALL leads before applying status filter
+        # Compute accurate counts over ALL retrieved leads before applying status filter
         total_count = len(leads)
         in_crm_count = sum(1 for l in leads if l.get("in_crm") or l.get("added_to_crm") or l.get("candidate_status") == "approved")
         rejected_count = sum(1 for l in leads if l.get("candidate_status") in ("rejected", "skipped"))
@@ -2638,96 +2663,286 @@ async def get_discovered_leads(
         return JSONResponse({"error": str(e), "leads": []}, status_code=500)
 
 
+@app.get("/api/discovery/export.csv")
+async def export_discovered_leads_csv(
+    profile_id: str | None = None,
+    include_sample: bool = False,
+    demo_mode: bool = False,
+):
+    """CSV export of discovered leads. Excludes is_sample=1 rows unless explicitly requested."""
+    import csv
+    import io
+    try:
+        state = _state()
+        await state.init_db()
+        show_sample = bool(include_sample or demo_mode)
+        leads = await state.get_discovered_leads(profile_id=profile_id, include_sample=show_sample)
+
+        buf = io.StringIO()
+        writer = csv.writer(buf)
+        writer.writerow(["company_name", "domain", "industry", "location", "score", "tier", "is_sample"])
+        for l in leads:
+            writer.writerow([
+                l.get("company_name", ""),
+                l.get("domain", ""),
+                l.get("industry", ""),
+                l.get("location", ""),
+                l.get("score", 0),
+                l.get("tier", ""),
+                l.get("is_sample", 0),
+            ])
+        return PlainTextResponse(
+            buf.getvalue(),
+            media_type="text/csv",
+            headers={"Content-Disposition": 'attachment; filename="discovered_leads.csv"'},
+        )
+    except Exception as e:
+        logger.exception("Failed to export discovered leads")
+        return PlainTextResponse(f"Export failed: {e}", status_code=500)
+
+
 @app.post("/api/discovery/search")
 async def run_discovery_search(request: Request):
-    """Discover candidate companies matching criteria or profile with strict fact honesty."""
+    """Discover candidate companies matching the supplied criteria.
+
+    Wired to the real run_discovery() in harvey/collectors/discover.py.
+    Only $0-by-default providers (TinyFish, OpenStreetMap) are eligible.
+    Serper/DataForSEO/Scavio have non-zero cost and are refused.
+
+    Flow:
+      1. Parse industry / location from request body.
+      2. No-key → status=unavailable (no sample fallback).
+      3. Serper-only key → refused (Serper has per-query cost).
+      4. Cost estimate first; if > 0 and no explicit confirm=true → refused.
+      5. Signal gate: no confirmed signals → clear error with confirm action.
+      6. run_discovery() → rows saved with is_sample=0 and source_url.
+    """
     try:
-        from harvey.qualification import (
-            SampleLeadDiscoveryProvider,
-            LeadQualifier,
-            check_discovered_lead_duplicates,
+        from harvey.config import load_config, load_env
+        from harvey.collectors.discover import (
+            run_discovery, build_queries, DiscoveryQuery, PROVIDERS,
         )
 
-        body = await request.json() if request.headers.get("content-type") == "application/json" else {}
-        profile_id = body.get("profile_id")
-        limit = int(body.get("limit") or 5)
+        body = (
+            await request.json()
+            if request.headers.get("content-type") == "application/json"
+            else {}
+        )
+
+        demo_mode = bool(
+            body.get("demo_mode", False)
+            or body.get("business_type") == "Clean Energy Systems Integrator"
+        )
+        if demo_mode:
+            from harvey.qualification import SampleLeadDiscoveryProvider, LeadQualifier
+            limit = int(body.get("limit") or 2)
+            profile = {
+                "id": "custom_search",
+                "industry": body.get("industry") or "IT, Software, SaaS and AI",
+                "geography": body.get("location") or "Indore",
+            }
+            state = _state()
+            await state.init_db()
+            provider = SampleLeadDiscoveryProvider()
+            candidates = await provider.discover(profile, limit=limit)
+            qualifier = LeadQualifier()
+            sample_leads = []
+            for candidate in candidates:
+                qual = qualifier.qualify(candidate, profile)
+                lead_dict = candidate.to_dict()
+                lead_dict.update({
+                    "profile_id": "custom_search",
+                    "score": qual.score,
+                    "tier": qual.tier,
+                    "reasons": qual.reasons,
+                    "missing_fields": qual.missing_information,
+                    "confidence": qual.confidence,
+                    "is_qualified": qual.is_qualified,
+                    "candidate_status": "pending",
+                    "business_type": body.get("business_type") or candidate.business_type or candidate.industry,
+                    "target_use_cases": body.get("use_cases") or candidate.relevant_use_cases or candidate.potential_needs,
+                    "bant_breakdown": qual.bant_breakdown,
+                    "is_sample": 1,
+                })
+                lead_id = await state.save_discovered_lead(lead_dict)
+                lead_dict["id"] = lead_id
+                sample_leads.append(lead_dict)
+            return {
+                "success": True,
+                "demo_mode": True,
+                "label": "DEMO SAMPLE FIXTURE",
+                "leads": sample_leads,
+                "count": len(sample_leads),
+                "discovered_count": len(sample_leads),
+            }
+
+        env_vars = load_env()
+        tinyfish_key = (
+            os.environ.get("TINYFISH_API_KEY")
+            or getattr(env_vars, "tinyfish_api_key", None)
+            or ""
+        ).strip()
+        serper_key = (
+            os.environ.get("SERPER_API_KEY")
+            or getattr(env_vars, "serper_api_key", None)
+            or ""
+        ).strip()
+
+        # 1. No key → unavailable; never fall back to sample fixtures.
+        if not tinyfish_key and not serper_key:
+            return {
+                "success": False,
+                "status": "unavailable",
+                "message": (
+                    "unavailable: No live discovery provider configured. "
+                    "Add TINYFISH_API_KEY (free) to .env to enable live discovery."
+                ),
+                "leads": [],
+                "count": 0,
+                "discovered_count": 0,
+            }
+
+        # 2. Serper key present but no TinyFish → refused (Serper has per-query cost).
+        if serper_key and not tinyfish_key:
+            return {
+                "success": False,
+                "status": "unavailable",
+                "message": (
+                    "Only SERPER_API_KEY is configured, but Serper charges per query. "
+                    "This endpoint only runs $0-by-default providers. "
+                    "Add a free TINYFISH_API_KEY to run live discovery."
+                ),
+                "leads": [],
+                "count": 0,
+                "discovered_count": 0,
+            }
+
+        # TinyFish is the only $0 provider that also works for SERP-style queries.
+        provider_key = "tinyfish"
+
+        # 3. Build queries from request body criteria.
+        industry = (body.get("industry") or "").strip()
+        location = (body.get("location") or "").strip()
+        limit = max(1, min(50, int(body.get("limit") or 10)))
+        confirm = bool(body.get("confirm", False))
+
+        config = load_config()
+        industries = [industry] if industry else None
+        cities = [location] if location else None
+        queries = build_queries(config, cities=cities, industries=industries,
+                                depth=10, limit=limit)
+        if not queries:
+            return {
+                "success": False,
+                "status": "error",
+                "message": "No search queries could be built from the supplied criteria.",
+                "leads": [],
+                "count": 0,
+                "discovered_count": 0,
+            }
 
         state = _state()
         await state.init_db()
 
-        # Build composite profile from saved profile + custom overrides
-        profile = {}
-        if profile_id:
-            profile = await state.get_business_profile(profile_id) or {}
+        # 4. Cost estimate — always $0 for TinyFish; shown for transparency.
+        provider = PROVIDERS[provider_key]
+        estimated_cost = provider.estimate(queries)
+        if estimated_cost > 0 and not confirm:
+            return {
+                "success": False,
+                "status": "cost_confirmation_required",
+                "message": (
+                    f"Estimated cost ${estimated_cost:.4f} > $0. "
+                    "Re-send with confirm=true to proceed."
+                ),
+                "estimated_cost": estimated_cost,
+                "leads": [],
+                "count": 0,
+                "discovered_count": 0,
+            }
 
-        # Apply search criteria overrides if provided
-        if body.get("industry"):
-            profile["industry"] = body["industry"]
-        if body.get("location"):
-            profile["geography"] = body["location"]
-        if body.get("geography_scope"):
-            profile["geography_scope"] = body["geography_scope"]
-        if body.get("company_size"):
-            profile["company_size"] = body["company_size"]
-        if body.get("business_type"):
-            profile["business_type"] = body["business_type"]
-        if body.get("use_cases"):
-            profile["target_use_cases"] = body["use_cases"]
+        # 5–6. Signal gate + run_discovery (includes signal gate internally).
+        report = await run_discovery(
+            state, config, provider_key, queries, max_spend=0.0,
+        )
 
-        if not profile.get("industry"):
-            profile["industry"] = "IT, Software, SaaS and AI"
-        if not profile.get("id"):
-            profile["id"] = profile_id or "custom_search"
+        if report.stopped == "no confirmed signals":
+            return {
+                "success": False,
+                "status": "no_confirmed_signals",
+                "message": (
+                    "No signals are confirmed — confirm free signals first "
+                    "(Dashboard → Signals, or run: harvey signals --confirm free). "
+                    "Discovery has nothing to record until at least one signal is confirmed."
+                ),
+                "leads": [],
+                "count": 0,
+                "discovered_count": 0,
+            }
 
-        provider = SampleLeadDiscoveryProvider()
-        candidates = await provider.discover(profile, limit=limit)
-        qualifier = LeadQualifier()
+        if report.stopped and report.stopped != "":
+            return {
+                "success": False,
+                "status": "stopped",
+                "message": f"Discovery stopped: {report.stopped}",
+                "errors": report.errors,
+                "leads": [],
+                "count": 0,
+                "discovered_count": report.new_companies + report.known_companies,
+            }
 
-        results = []
-        for candidate in candidates:
-            qual = qualifier.qualify(candidate, profile)
-            lead_dict = candidate.to_dict()
-            lead_dict.update({
-                "profile_id": profile.get("id", ""),
-                "score": qual.score,
-                "tier": qual.tier,
-                "reasons": qual.reasons,
-                "missing_fields": qual.missing_information,
-                "confidence": qual.confidence,
-                "is_qualified": qual.is_qualified,
-                "candidate_status": "pending",
-                "business_type": body.get("business_type") or candidate.business_type or candidate.industry,
-                "target_use_cases": body.get("use_cases") or candidate.relevant_use_cases or candidate.potential_needs,
-                "bant_breakdown": qual.bant_breakdown,
-            })
-            lead_id = await state.save_discovered_lead(lead_dict)
-            lead_dict["id"] = lead_id
-            results.append(lead_dict)
-
-        # Deduplicate candidate results by normalized domain
-        seen_domains = set()
-        deduped_results = []
-        for r in results:
-            dom = (r.get("domain") or "").strip().lower()
-            if dom:
-                if dom in seen_domains:
-                    continue
-                seen_domains.add(dom)
-            deduped_results.append(r)
-        results = deduped_results
-
-        # Run duplicate detection against CRM
-        results = await check_discovered_lead_duplicates(results, state)
+        # 7. Collect companies saved in this run (is_sample=0, include source_url).
+        leads = []
+        if report.run_id:
+            async with state._connect() as db:
+                db.row_factory = __import__("aiosqlite").Row
+                async with db.execute(
+                    """
+                    SELECT c.id, c.name, c.domain, c.website, c.industry,
+                           c.location, c.source, c.source_url
+                    FROM companies c
+                    JOIN observations o ON o.company_id = c.id
+                    WHERE o.run_id = ?
+                    GROUP BY c.id
+                    ORDER BY c.created_at DESC
+                    """,
+                    (report.run_id,),
+                ) as cur:
+                    rows = await cur.fetchall()
+                    for row in rows:
+                        leads.append({
+                            "id": row["id"],
+                            "company_name": row["name"],
+                            "domain": row["domain"],
+                            "website": row["website"],
+                            "industry": row["industry"],
+                            "location": row["location"],
+                            "provider": (row["source"] or "").replace("discover:", ""),
+                            "source_url": row["source_url"] or "",
+                            "is_sample": 0,
+                        })
 
         return {
             "success": True,
-            "profile_id": profile.get("id"),
-            "profile_name": profile.get("name") or profile.get("industry"),
-            "discovered_count": len(results),
-            "leads": results,
+            "provider": provider_key,
+            "estimated_cost": round(estimated_cost, 4),
+            "actual_cost": round(report.actual_cost, 4),
+            "run_id": report.run_id,
+            "new_companies": report.new_companies,
+            "known_companies": report.known_companies,
+            "observations": report.observations,
+            "discovered_count": len(leads),
+            "count": len(leads),
+            "leads": leads,
+            "errors": report.errors,
+            "stopped": report.stopped or None,
         }
+
     except json.JSONDecodeError as e:
-        return JSONResponse({"success": False, "error": f"Invalid JSON payload: {e.msg}"}, status_code=400)
+        return JSONResponse(
+            {"success": False, "error": f"Invalid JSON payload: {e.msg}"},
+            status_code=400,
+        )
     except Exception as e:
         logger.exception("Discovery search failed")
         return JSONResponse({"success": False, "error": str(e)}, status_code=500)

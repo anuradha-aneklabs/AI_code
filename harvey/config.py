@@ -845,6 +845,29 @@ def load_config(config_path: str | None = None) -> HarveyConfig:
             f"got {type(data).__name__}."
         )
 
+    # When loading harvey.local.yaml, merge on top of base harvey.yaml if present
+    # so operators can specify just an `icp` or `channels` override block.
+    if Path(config_path).name == "harvey.local.yaml":
+        base_candidates = [
+            Path(config_path).parent / "harvey.yaml",
+            PROJECT_ROOT / "harvey.yaml",
+        ]
+        for bp in base_candidates:
+            if bp.exists() and bp.resolve() != Path(config_path).resolve():
+                try:
+                    loaded_base = yaml.safe_load(read_user_text(bp))
+                    if isinstance(loaded_base, dict):
+                        merged_data = dict(loaded_base)
+                        for k, v in data.items():
+                            if isinstance(v, dict) and isinstance(merged_data.get(k), dict):
+                                merged_data[k] = {**merged_data[k], **v}
+                            else:
+                                merged_data[k] = v
+                        data = merged_data
+                        break
+                except Exception:
+                    pass
+
     try:
         config = HarveyConfig(**data)
         config._source_path = str(config_path)

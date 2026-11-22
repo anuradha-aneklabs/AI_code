@@ -21,6 +21,7 @@ already learned.
 """
 
 import asyncio
+import json
 import os
 import sys
 import time
@@ -582,6 +583,8 @@ class Business:
     raw_title: str = ""             # SERP evidence for junk filtering before normalization
     provenance: str = ""            # Data origin label (e.g. OpenStreetMap Overpass / Nominatim)
     source_limitation: str = ""     # Transparency disclaimer regarding coverage
+    result_class: str = "unknown"
+    result_class_reason: str = ""
 
     def identity(self) -> str:
         return self.domain or self.external_id
@@ -598,8 +601,11 @@ class DiscoveryQuery:
     depth: int = 30                  # SERP depth; ignored by listings providers
     limit: int = 100                 # max records to take from one query
     preset: str = ""                 # PRESETS key that built it, if any
+    full_query: str = ""             # explicit expanded query string if supplied
 
     def keyword(self) -> str:
+        if self.full_query:
+            return self.full_query
         return f"{self.term} {self.location}".strip()
 
 
@@ -1758,6 +1764,7 @@ class DiscoveryReport:
     run_id: str = ""
     errors: list[str] = field(default_factory=list)
     stopped: str = ""
+    results: list[dict] = field(default_factory=list)
 
     def as_dict(self) -> dict:
         return {
@@ -1773,6 +1780,7 @@ class DiscoveryReport:
             "observations": self.observations,
             "run_id": self.run_id, "errors": self.errors,
             "stopped": self.stopped,
+            "results": self.results,
         }
 
 
@@ -1879,8 +1887,158 @@ def preset_problem(preset: str, provider_key: str, config=None) -> str | None:
     return None
 
 
+def load_discovery_classification_config() -> dict:
+    """Load search result classification configuration."""
+    cfg_path = PROJECT_ROOT / "config" / "discovery_classification.json"
+    if cfg_path.exists():
+        try:
+            with open(cfg_path, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception as e:
+            logger.warning("Failed to load discovery_classification.json: %s", e)
+    return {}
+
+
+def load_discovery_queries_config() -> dict:
+    """Load search query expansion templates and synonyms."""
+    cfg_path = PROJECT_ROOT / "config" / "discovery_queries.json"
+    if cfg_path.exists():
+        try:
+            with open(cfg_path, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception as e:
+            logger.warning("Failed to load discovery_queries.json: %s", e)
+    return {}
+
+
+def root_domain_url(url: str, domain: str) -> str:
+    """Normalize a company homepage URL to its registrable-domain root."""
+    try:
+        parsed = urlparse(url)
+        scheme = parsed.scheme or "https"
+        netloc = parsed.netloc or domain
+        return f"{scheme}://{netloc}/"
+    except Exception:
+        return f"https://{domain}/" if domain else url
+
+
+def classify_search_result(
+    url: str, title: str = "", config: dict | None = None
+) -> tuple[str, str]:
+    """Classify a search result into one of the designated categories:
+      - company_homepage
+      - article_or_reference
+      - government_or_education
+      - forum_or_community
+      - file_or_model_hub
+      - directory_or_listicle
+      - unknown
+
+    Returns (result_class, reason).
+    """
+    if not url or not isinstance(url, str):
+        return "unknown", "Empty or non-string URL"
+
+    cfg = config if config is not None else load_discovery_classification_config()
+
+    try:
+        parsed = urlparse(url)
+    except Exception as e:
+        return "unknown", f"Unparseable URL: {e}"
+
+    host = (parsed.netloc or "").lower().split(":")[0].strip()
+    if host.startswith("www."):
+        host = host[4:]
+    path = (parsed.path or "").lower()
+    clean_path = path.strip("/")
+    title_lower = (title or "").lower().strip()
+
+    # 1. File or model hub
+    file_exts = cfg.get("file_extensions") or []
+    for ext in file_exts:
+        ext_lower = ext.lower()
+        if path.endswith(ext_lower) or f"{ext_lower}?" in url.lower() or f"{ext_lower}&" in url.lower():
+            return "file_or_model_hub", f"File extension in URL: {ext}"
+
+    hub_hosts = cfg.get("file_or_model_hub_hosts") or []
+    for hub in hub_hosts:
+        hub_lower = hub.lower()
+        if host == hub_lower or host.endswith("." + hub_lower):
+            return "file_or_model_hub", f"Model or code repository host: {host}"
+
+    # 2. Government or education
+    gov_edu_patterns = cfg.get("government_or_education_patterns") or []
+    for pat in gov_edu_patterns:
+        pat_lower = pat.lower()
+        if host.endswith(pat_lower) or f"{pat_lower}." in host or f".{pat_lower}." in host:
+            return "government_or_education", f"Government or educational domain pattern: {pat}"
+
+    gov_edu_hosts = cfg.get("government_or_education_hosts") or []
+    for geh in gov_edu_hosts:
+        geh_lower = geh.lower()
+        if host == geh_lower or host.endswith("." + geh_lower):
+            return "government_or_education", f"Government/educational host: {host}"
+
+    # 3. Reference or encyclopedia
+    ref_hosts = cfg.get("reference_hosts") or []
+    for rh in ref_hosts:
+        rh_lower = rh.lower()
+        if host == rh_lower or host.endswith("." + rh_lower):
+            return "article_or_reference", f"Reference or encyclopedia host: {host}"
+
+    ref_indicators = cfg.get("reference_path_indicators") or []
+    for ind in ref_indicators:
+        if ind.lower() in path:
+            return "article_or_reference", f"Reference path indicator: {ind}"
+
+    # 4. Forum or community
+    forum_hosts = cfg.get("forum_hosts") or []
+    for fh in forum_hosts:
+        fh_lower = fh.lower()
+        if host == fh_lower or host.endswith("." + fh_lower):
+            return "forum_or_community", f"Forum or community host: {host}"
+
+    forum_indicators = cfg.get("forum_path_indicators") or []
+    for ind in forum_indicators:
+        if ind.lower() in path:
+            return "forum_or_community", f"Forum path indicator: {ind}"
+
+    # 5. Directory or listicle
+    dir_hosts = cfg.get("directory_hosts") or []
+    for dh in dir_hosts:
+        dh_lower = dh.lower()
+        if host == dh_lower or host.endswith("." + dh_lower):
+            return "directory_or_listicle", f"Business directory or aggregator host: {host}"
+
+    dir_indicators = cfg.get("directory_path_indicators") or []
+    for ind in dir_indicators:
+        if ind.lower() in path:
+            return "directory_or_listicle", f"Directory path indicator: {ind}"
+
+    listicle_patterns = ["top 10", "top 20", "top 50", "best 10", "best 20", "list of "]
+    if any(p in title_lower for p in listicle_patterns):
+        return "directory_or_listicle", "Listicle title pattern"
+
+    # 6. Company Homepage vs Article / Deep Unknown
+    article_patterns = ["/blog/", "/news/", "/article/", "/articles/", "/post/", "/posts/", "/entry/"]
+    if any(p in path for p in article_patterns) or bool(re.search(r"/202[0-9]/", path)):
+        return "article_or_reference", f"Article or blog post path: {path}"
+
+    common_home_paths = {"", "en", "en-us", "home", "index.html", "index.php", "about", "about-us", "contact", "contact-us"}
+    if not clean_path or clean_path in common_home_paths:
+        return "company_homepage", "Root or company homepage URL"
+
+    segments = clean_path.split("/")
+    if len(segments) <= 1 and not re.search(r"[-_]{2,}", clean_path):
+        return "company_homepage", f"Top-level section URL: /{clean_path}"
+
+    return "unknown", f"Deep or unclassified URL path ({len(segments)} segments): /{clean_path}"
+
+
 def build_queries(config, cities: list[str] | None = None,
-                  depth: int = 30, limit: int = 100, preset: str = "") -> list[DiscoveryQuery]:
+                  industries: list[str] | None = None,
+                  depth: int = 30, limit: int = 100, preset: str = "",
+                  expand_queries: bool = False) -> list[DiscoveryQuery]:
     """Turn the configured ICP into a concrete query list.
 
     One query per (industry or keyword variant x city). Coordinates come from
@@ -1889,7 +2047,10 @@ def build_queries(config, cities: list[str] | None = None,
     into its search; a non-local one only uses cities you pass.
     """
     icp = config.icp
-    terms = list(icp.industries) or [config.product.name]
+    if industries is not None:
+        terms = [i.strip() for i in industries if i and i.strip()] or [config.product.name]
+    else:
+        terms = list(icp.industries) or [config.product.name]
     spec = PRESETS.get(preset) if preset else None
     if spec:
         templates = preset_templates(spec)
@@ -1900,23 +2061,89 @@ def build_queries(config, cities: list[str] | None = None,
                  for r in roles for t in terms for tpl in templates]
         raw_places = cities if cities is not None else ([""] if not spec["local"] else list(icp.geography) or [""])
         places = parse_cities(raw_places) or [""]
+        coords = getattr(icp, "geo_coordinates", {}) or {}
+        return [
+            DiscoveryQuery(term=term, location=place, depth=depth, limit=limit,
+                           coordinate=coords.get(place, ""), preset=preset if spec else "")
+            for term in terms
+            for place in places
+        ]
     else:
-        # "roofing contractor" is one way to search for a roofer. Each
-        # configured variant is another search in every city — ranks differ
-        # by phrasing, and the email should quote the phrase that was used.
-        variants = getattr(icp, "keyword_variants", {}) or {}
-        terms = list(dict.fromkeys(
-            v.strip() for t in terms for v in [t, *variants.get(t, [])] if v.strip()))
         raw_places = cities if cities is not None else list(icp.geography) or [""]
         places = parse_cities(raw_places) or [""]
-    coords = getattr(icp, "geo_coordinates", {}) or {}
+        coords = getattr(icp, "geo_coordinates", {}) or {}
 
-    return [
-        DiscoveryQuery(term=term, location=place, depth=depth, limit=limit,
-                       coordinate=coords.get(place, ""), preset=preset if spec else "")
-        for term in terms
-        for place in places
-    ]
+        # Check for config-driven query expansion templates and synonyms
+        q_cfg = load_discovery_queries_config()
+        templates = q_cfg.get("templates") or []
+        synonyms_map = q_cfg.get("synonyms") or {}
+        max_queries = int(q_cfg.get("max_queries") or 4)
+
+        variants = getattr(icp, "keyword_variants", {}) or {}
+
+        # If keyword_variants are explicitly defined in ICP, respect them directly
+        if variants:
+            terms = list(dict.fromkeys(
+                v.strip() for t in terms for v in [t, *variants.get(t, [])] if v.strip()))
+            return [
+                DiscoveryQuery(term=term, location=place, depth=depth, limit=limit,
+                               coordinate=coords.get(place, ""), preset="")
+                for term in terms
+                for place in places
+            ]
+
+        # Check if any term matches synonyms in discovery_queries.json
+        has_synonyms = False
+        if templates and synonyms_map:
+            for term in terms:
+                for k in synonyms_map:
+                    if k.strip().lower() == term.strip().lower():
+                        has_synonyms = True
+                        break
+                if has_synonyms:
+                    break
+
+        if expand_queries and has_synonyms:
+            out_queries: list[DiscoveryQuery] = []
+            for term in terms:
+                term_synonyms: list[str] = []
+                for k, syns in synonyms_map.items():
+                    if k.strip().lower() == term.strip().lower():
+                        term_synonyms.extend(syns)
+
+                for place in places:
+                    candidates: list[str] = []
+                    for tpl in templates:
+                        candidates.append(tpl.format(industry=term, location=place))
+                    for syn in term_synonyms:
+                        for tpl in templates:
+                            candidates.append(tpl.format(industry=syn, location=place))
+
+                    cleaned_candidates = [
+                        re.sub(r"\bcompany\s+company\b", "company", c, flags=re.I).strip()
+                        for c in candidates if c.strip()
+                    ]
+                    deduped = list(dict.fromkeys(cleaned_candidates))
+                    for full_q in deduped:
+                        out_queries.append(
+                            DiscoveryQuery(
+                                term=term,
+                                location=place,
+                                depth=depth,
+                                limit=limit,
+                                coordinate=coords.get(place, ""),
+                                preset="",
+                                full_query=full_q,
+                            )
+                        )
+            return out_queries[:max_queries]
+
+        return [
+            DiscoveryQuery(term=term, location=place, depth=depth, limit=limit,
+                           coordinate=coords.get(place, ""), preset="")
+            for term in terms
+            for place in places
+        ]
 
 
 def estimate_cost(provider_key: str, queries: list[DiscoveryQuery]) -> float:
@@ -2039,6 +2266,60 @@ async def run_discovery(
                 report.found += len(found)
                 batch = []
                 for biz in found:
+                    if biz.website:
+                        target_url = biz.website
+                    elif biz.source_url and "openstreetmap.org" not in biz.source_url:
+                        target_url = biz.source_url
+                    elif biz.domain:
+                        target_url = f"https://{biz.domain}/"
+                    else:
+                        target_url = biz.source_url or ""
+                    if target_url:
+                        res_class, res_reason = classify_search_result(target_url, biz.raw_title or biz.name)
+                    elif biz.has_website is False or biz.external_id:
+                        res_class = "company_homepage"
+                        res_reason = "Local business listing without website"
+                    else:
+                        res_class = "unknown"
+                        res_reason = "No URL or domain provided"
+
+                    biz.result_class = res_class
+                    biz.result_class_reason = res_reason
+
+                    # Record every search result in state (delete nothing)
+                    try:
+                        await state.save_discovery_result(
+                            run_id=report.run_id,
+                            query=query.keyword(),
+                            title=biz.raw_title or biz.name,
+                            url=biz.source_url or target_url,
+                            domain=biz.domain,
+                            result_class=res_class,
+                            reason=res_reason,
+                            location_status="location_unverified",
+                        )
+                    except Exception as e:
+                        logger.debug("Failed to record discovery result row: %s", e)
+
+                    report.results.append({
+                        "query": query.keyword(),
+                        "title": biz.raw_title or biz.name,
+                        "url": biz.source_url or target_url,
+                        "domain": biz.domain,
+                        "result_class": res_class,
+                        "reason": res_reason,
+                        "location_status": "location_unverified",
+                    })
+
+                    # Only company_homepage results become company records and go to the profiler
+                    if res_class != "company_homepage":
+                        report.junk += 1
+                        continue
+
+                    # Save company at the registrable-domain root URL, keeping original result URL as origin evidence
+                    if biz.source_url and biz.domain:
+                        biz.website = root_domain_url(biz.source_url, biz.domain)
+
                     if query.preset == "hiring" and biz.domain and not is_junk(biz.domain):
                         # Judged on the host as found first: jobs.lever.co
                         # stripped would be lever.co, a vendor, not junk.
@@ -2155,6 +2436,8 @@ async def _upsert(state, biz: Business, query: DiscoveryQuery) -> tuple[str, boo
         source=f"discover:{biz.provider}",
         source_url=biz.source_url,
         external_id=biz.external_id,
+        result_class=getattr(biz, "result_class", "company_homepage") or "company_homepage",
+        location_status="location_unverified",
     )
     return await state.add_company(company), True
 

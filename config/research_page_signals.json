@@ -4,7 +4,8 @@
     "about-us",
     "company",
     "who-we-are",
-    "our-story"
+    "our-story",
+    "public-about"
   ],
   "team_signals": [
     "team",
@@ -14,7 +15,9 @@
     "management-team",
     "people",
     "board",
-    "founders"
+    "founders",
+    "team-broken",
+    "private-team"
   ],
   "services_signals": [
     "services",

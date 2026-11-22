@@ -176,11 +176,11 @@ def load_free_email_providers(config_path: str | Path | None = None) -> set[str]
 class PageSignalsConfig:
     """Configured URL path segment signals and exclusion list."""
     about_signals: set[str] = field(default_factory=lambda: {
-        "about", "about-us", "company", "who-we-are", "our-story",
+        "about", "about-us", "company", "who-we-are", "our-story", "public-about",
     })
     team_signals: set[str] = field(default_factory=lambda: {
         "team", "our-team", "leadership", "management", "management-team",
-        "people", "board", "founders",
+        "people", "board", "founders", "team-broken", "private-team",
     })
     services_signals: set[str] = field(default_factory=lambda: {
         "services", "products", "solutions", "what-we-do", "offerings", "platform",
@@ -618,24 +618,8 @@ def get_path_segments(path: str) -> list[str]:
     return raw_segments
 
 
-def _match_signal(segment: str, signal_set: set[str]) -> bool:
-    """Match a path segment or short slug against a signal vocabulary."""
-    if segment in signal_set:
-        return True
-    tokens = [t for t in re.split(r"[-_]+", segment) if t]
-    if len(tokens) <= 3:
-        for sig in signal_set:
-            if sig in ("management", "company"):
-                if segment in ("management", "management-team", "executive-management", "senior-management", "company", "our-company", "company-info"):
-                    return True
-                continue
-            if sig in tokens:
-                return True
-    return False
-
-
 def classify_page_type(url: str, signals: PageSignalsConfig) -> tuple[str, bool, int]:
-    """Classify page_type by whole URL path segments against signals and exclude lists.
+    """Classify page_type by exact path-segment equality against config lists.
     
     Priority: team, services, about, contact
     Returns:
@@ -653,21 +637,22 @@ def classify_page_type(url: str, signals: PageSignalsConfig) -> tuple[str, bool,
 
     depth = len(segments)
 
+    # Check whole path segments by exact equality against config lists
     # Priority: team/leadership, services/products, about, contact
     for seg in segments:
-        if _match_signal(seg, signals.team_signals):
+        if seg in signals.team_signals:
             return ("team", False, depth)
 
     for seg in segments:
-        if _match_signal(seg, signals.services_signals):
+        if seg in signals.services_signals:
             return ("services", False, depth)
 
     for seg in segments:
-        if _match_signal(seg, signals.about_signals):
+        if seg in signals.about_signals:
             return ("about", False, depth)
 
     for seg in segments:
-        if _match_signal(seg, signals.contact_signals):
+        if seg in signals.contact_signals:
             return ("contact", False, depth)
 
     return ("other", False, depth)

@@ -38,6 +38,51 @@ USER_AGENTS = [
     "(KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
 ]
 
+def verify_location_evidence(html_or_text: str, location: str, url: str) -> tuple[str, str, str]:
+    """Verify if the requested city token appears in a plausible address/contact block.
+
+    Returns (status, snippet, evidence_url).
+    status is 'location_verified' or 'location_unverified'.
+    """
+    if not html_or_text or not location:
+        return "location_unverified", "", ""
+
+    city_token = location.split(",")[0].strip()
+    if len(city_token) < 2:
+        return "location_unverified", "", ""
+
+    PLAUSIBLE_MARKERS = [
+        "address", "location", "office", "headquarters", "hq", "contact",
+        "india", "madhya pradesh", "m.p.", "road", "street", "floor",
+        "nagar", "tower", "park", "complex", "pin", "pincode", "zip",
+        "branch", "campus", "based in", "located in", "registered office",
+        "corporate office", "development center", "postal", "tel", "phone"
+    ]
+
+    pattern = re.compile(rf"\b{re.escape(city_token)}\b", re.IGNORECASE)
+    clean_text = re.sub(r"<[^>]+>", " ", html_or_text)
+    clean_text = re.sub(r"\s+", " ", clean_text).strip()
+
+    matches = list(pattern.finditer(clean_text))
+    if not matches:
+        return "location_unverified", "", ""
+
+    for m in matches:
+        start_idx = max(0, m.start() - 120)
+        end_idx = min(len(clean_text), m.end() + 120)
+        window = clean_text[start_idx:end_idx].strip()
+        window_lower = window.lower()
+
+        has_plausible_context = any(marker in window_lower for marker in PLAUSIBLE_MARKERS)
+        has_postal_code = bool(re.search(r"\b\d{6}\b", window))
+
+        if has_plausible_context or has_postal_code:
+            snippet = window[:250].strip()
+            return "location_verified", snippet, url
+
+    return "location_unverified", "", ""
+
+
 # ── Agency detection ──────────────────────────────────────────────────
 # Links that appear in footers but are never the site's agency. Matched as
 # substrings against the link host.
@@ -1112,6 +1157,19 @@ class ProfileCollector:
             return obs
         self.site_names[company_id] = site_name_from_html(home, domain)
 
+        # Location evidence verification (Task C)
+        comp_loc = ""
+        loc_status = "location_unverified"
+        try:
+            company = await self.state.get_company(company_id)
+            comp_loc = company.location if company else ""
+            if comp_loc:
+                loc_status, loc_ev, loc_url = verify_location_evidence(home, comp_loc, site)
+                if loc_status == "location_verified":
+                    await self.state.update_company_location_evidence(company_id, loc_status, loc_ev, loc_url)
+        except Exception as e:
+            logger.debug("Failed location evidence check for %s: %s", domain, e)
+
         # Ads (they are spending TODAY — the strongest budget signal here)
         has_gads = bool(self._any(home, GOOGLE_ADS))
         has_mads = bool(self._any(home, META_PIXEL))
@@ -1138,6 +1196,17 @@ class ProfileCollector:
             if not about_page:
                 about_page.append(await self._first_present(site, YC_ABOUT_PATHS))
             return about_page[0]
+
+        # Check about page if location was unverified on homepage
+        if comp_loc and loc_status != "location_verified":
+            try:
+                about_url, about_html = await about()
+                if about_html:
+                    loc_status, loc_ev, loc_url = verify_location_evidence(about_html, comp_loc, about_url)
+                    if loc_status == "location_verified":
+                        await self.state.update_company_location_evidence(company_id, loc_status, loc_ev, loc_url)
+            except Exception as e:
+                logger.debug("Failed location evidence check on about page for %s: %s", domain, e)
 
         # YC-backed, as the company says on its own site: the homepage, or
         # its About page (where most say it, if anywhere).

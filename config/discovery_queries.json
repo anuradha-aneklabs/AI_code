@@ -1,0 +1,15 @@
+{
+  "max_queries": 4,
+  "templates": [
+    "{industry} company in {location}",
+    "{industry} startup {location} contact",
+    "{industry} companies headquartered in {location}"
+  ],
+  "synonyms": {
+    "SaaS": [
+      "software company",
+      "software development company",
+      "SaaS startup"
+    ]
+  }
+}

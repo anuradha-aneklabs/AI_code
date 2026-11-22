@@ -1,0 +1,42 @@
+{
+  "file_extensions": [
+    ".txt", ".pdf", ".csv", ".tsv", ".doc", ".docx", ".xls", ".xlsx",
+    ".zip", ".tar", ".gz", ".bin", ".pt", ".onnx", ".json", ".xml", ".yaml", ".yml"
+  ],
+  "file_or_model_hub_hosts": [
+    "huggingface.co", "github.com", "gitlab.com", "kaggle.com",
+    "drive.google.com", "dropbox.com", "box.com", "onedrive.live.com",
+    "bitbucket.org", "sourceforge.net"
+  ],
+  "government_or_education_patterns": [
+    ".gov", ".nic.in", ".gov.in", ".gov.uk", ".gov.au",
+    ".edu", ".edu.in", ".ac.in", ".ac.uk", ".ernet.in", ".mil"
+  ],
+  "government_or_education_hosts": [],
+  "reference_hosts": [
+    "britannica.com", "wikipedia.org", "wikimedia.org", "wikivoyage.org",
+    "wiktionary.org", "investopedia.com", "thefreedictionary.com",
+    "dictionary.com", "merriam-webster.com", "thesaurus.com"
+  ],
+  "reference_path_indicators": [
+    "/place/", "/wiki/", "/entry/", "/definitions/", "/reference/"
+  ],
+  "forum_hosts": [
+    "reddit.com", "quora.com", "stackoverflow.com", "stackexchange.com",
+    "medium.com", "substack.com", "sikhphilosophy.net"
+  ],
+  "forum_path_indicators": [
+    "/threads/", "/forum/", "/forums/", "/discussion/", "/discussions/",
+    "/community/", "/topic/", "/questions/"
+  ],
+  "directory_hosts": [
+    "yelp.com", "yellowpages.com", "clutch.co", "goodfirms.co", "justdial.com",
+    "sulekha.com", "indiamart.com", "linkedin.com", "facebook.com", "twitter.com",
+    "instagram.com", "tripadvisor.com", "glassdoor.com", "indeed.com", "zoominfo.com",
+    "crunchbase.com", "g2.com", "capterra.com", "trustpilot.com", "mapquest.com",
+    "zaubacorp.com", "tofler.in", "instafinancials.com"
+  ],
+  "directory_path_indicators": [
+    "/directory/", "/listings/", "/companies/", "/best-", "/top-"
+  ]
+}
