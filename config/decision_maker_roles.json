@@ -52,5 +52,17 @@
     "intelligence", "lead", "gen", "generation", "product", "products",
     "solution", "solutions", "resource", "resources", "career", "careers",
     "privacy", "terms", "policy", "cookie", "cookies", "login", "signup"
-  ]
+  ],
+  "non_person_generic_words": [
+    "signatory", "authorized", "representative", "admin", "administrator",
+    "team", "support", "sales", "contact", "management", "department",
+    "staff", "employee", "customer", "client", "user", "board", "member",
+    "officer", "director", "founder", "partner", "president", "legal",
+    "signature", "official", "attorney", "counsel", "anyone", "everyone",
+    "nobody", "someone", "candidate", "applicant"
+  ],
+  "external_context_patterns": {
+    "testimonial": "(?i)\\b(testimonials?|reviews?|client\\s+stories|what\\s+(?:our\\s+)?clients?\\s+say|what\\s+people\\s+say|customer\\s+feedback)\\b|[“”]",
+    "advisor_or_investor": "(?i)\\b(trusted\\s+by|backed\\s+by|investors?|advisors?|advisory\\s+board|mentors?|portfolio\\s+companies|our\\s+partners)\\b"
+  }
 }

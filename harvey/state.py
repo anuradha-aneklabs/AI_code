@@ -905,6 +905,10 @@ MIGRATIONS: list[str] = [
     CREATE INDEX IF NOT EXISTS idx_discovery_results_domain ON discovery_results(domain);
     CREATE INDEX IF NOT EXISTS idx_discovery_results_class ON discovery_results(result_class);
     """,
+    # ── v29: decision-maker exclusion reason ──
+    """
+    ALTER TABLE research_people ADD COLUMN excluded_reason TEXT DEFAULT '';
+    """,
 ]
 
 CRM_PIPELINE_STAGES: list[str] = [
@@ -5395,27 +5399,48 @@ class StateManager:
         extraction_method: str = "none",
         also_seen_urls_json: str = "[]",
         reason: str = "",
+        excluded_reason: str = "",
         created_at: str | None = None,
     ) -> str:
         """Persist a single decision maker finding."""
         created = created_at or _utcnow().isoformat()
         async with self._connect() as db:
-            await db.execute(
-                """
-                INSERT INTO research_people (
-                    id, run_id, extraction_run_id, source_page_id, domain,
-                    full_name, title, role_category, source_url, evidence_text,
-                    confidence, verification_status, extraction_method,
-                    also_seen_urls_json, reason, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    person_id, run_id, extraction_run_id, source_page_id, domain,
-                    full_name, title, role_category, source_url, evidence_text,
-                    float(confidence), verification_status, extraction_method,
-                    also_seen_urls_json, reason, created,
-                ),
-            )
+            async with db.execute("PRAGMA table_info(research_people)") as cur:
+                cols = {r[1] for r in await cur.fetchall()}
+            if "excluded_reason" in cols:
+                await db.execute(
+                    """
+                    INSERT INTO research_people (
+                        id, run_id, extraction_run_id, source_page_id, domain,
+                        full_name, title, role_category, source_url, evidence_text,
+                        confidence, verification_status, extraction_method,
+                        also_seen_urls_json, reason, excluded_reason, created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        person_id, run_id, extraction_run_id, source_page_id, domain,
+                        full_name, title, role_category, source_url, evidence_text,
+                        float(confidence), verification_status, extraction_method,
+                        also_seen_urls_json, reason, excluded_reason, created,
+                    ),
+                )
+            else:
+                await db.execute(
+                    """
+                    INSERT INTO research_people (
+                        id, run_id, extraction_run_id, source_page_id, domain,
+                        full_name, title, role_category, source_url, evidence_text,
+                        confidence, verification_status, extraction_method,
+                        also_seen_urls_json, reason, created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        person_id, run_id, extraction_run_id, source_page_id, domain,
+                        full_name, title, role_category, source_url, evidence_text,
+                        float(confidence), verification_status, extraction_method,
+                        also_seen_urls_json, reason, created,
+                    ),
+                )
             await db.commit()
         return person_id
 
@@ -5423,18 +5448,27 @@ class StateManager:
         self,
         run_id: str,
         extraction_run_id: str | None = None,
+        include_excluded: bool = False,
     ) -> list[dict[str, Any]]:
         """Fetch research decision makers for a run.
         
         If extraction_run_id is None, returns decision makers from the latest extraction run.
+        If include_excluded is False, filters out rows with non-empty excluded_reason.
         """
         async with self._connect() as db:
             db.row_factory = aiosqlite.Row
+            async with db.execute("PRAGMA table_info(research_people)") as cur:
+                cols = {r[1] for r in await cur.fetchall()}
+
+            filter_clause = ""
+            if not include_excluded and "excluded_reason" in cols:
+                filter_clause = " AND (excluded_reason IS NULL OR excluded_reason = '') "
+
             if extraction_run_id:
                 async with db.execute(
-                    """
+                    f"""
                     SELECT * FROM research_people
-                    WHERE run_id = ? AND extraction_run_id = ?
+                    WHERE run_id = ? AND extraction_run_id = ? {filter_clause}
                     ORDER BY created_at ASC, id ASC
                     """,
                     (run_id, extraction_run_id),
@@ -5456,9 +5490,9 @@ class StateManager:
                     latest_id = row[0]
 
                 async with db.execute(
-                    """
+                    f"""
                     SELECT * FROM research_people
-                    WHERE run_id = ? AND extraction_run_id = ?
+                    WHERE run_id = ? AND extraction_run_id = ? {filter_clause}
                     ORDER BY created_at ASC, id ASC
                     """,
                     (run_id, latest_id),

@@ -53,6 +53,8 @@ class DecisionMakerRolesConfig:
         "sentence": 0.5,
     })
     non_person_marketing_words: list[str] = field(default_factory=list)
+    non_person_generic_words: list[str] = field(default_factory=list)
+    external_context_patterns: dict[str, str] = field(default_factory=dict)
 
 
 def load_roles_config(config_path: str | Path | None = None) -> DecisionMakerRolesConfig:
@@ -76,6 +78,8 @@ def load_roles_config(config_path: str | Path | None = None) -> DecisionMakerRol
                     generic_cxo_regex=data.get("generic_cxo_regex", r"(?i)\bchief\s+[a-z]+\s+officer\b"),
                     confidence_scores=data.get("confidence_scores", {}),
                     non_person_marketing_words=data.get("non_person_marketing_words", []),
+                    non_person_generic_words=data.get("non_person_generic_words", []),
+                    external_context_patterns=data.get("external_context_patterns", {}),
                 )
             except Exception as e:
                 logger.warning("Failed to load decision maker roles from %s: %s", p, e)
@@ -147,6 +151,7 @@ class DecisionMakerCandidate:
     extraction_method: str    # "jsonld_person" | "card" | "sentence" | "heading_list" | "none"
     also_seen_urls: list[str] = field(default_factory=list)
     reason: str = ""
+    excluded_reason: str = ""
 
 
 def _normalize_ws(text: str) -> str:
@@ -159,10 +164,8 @@ _INVALID_NAME_CHARS = frozenset({"|", "/", "\\", "@", "#", "$", "%", "^", "*", "
 
 def _get_marketing_words(config: DecisionMakerRolesConfig | None = None) -> frozenset[str]:
     """Retrieve marketing and navigation words from configuration."""
-    if config and config.non_person_marketing_words:
-        return frozenset(w.lower().strip() for w in config.non_person_marketing_words if w.strip())
-    cfg = load_roles_config()
-    if cfg.non_person_marketing_words:
+    cfg = config or load_roles_config()
+    if cfg and cfg.non_person_marketing_words:
         return frozenset(w.lower().strip() for w in cfg.non_person_marketing_words if w.strip())
     return frozenset({
         "landing", "page", "pages", "web", "website", "websites", "mobile",
@@ -177,26 +180,210 @@ def _get_marketing_words(config: DecisionMakerRolesConfig | None = None) -> froz
     })
 
 
+def _get_generic_words(config: DecisionMakerRolesConfig | None = None) -> frozenset[str]:
+    """Retrieve generic and role/legal non-person words from configuration."""
+    cfg = config or load_roles_config()
+    if cfg and cfg.non_person_generic_words:
+        return frozenset(w.lower().strip() for w in cfg.non_person_generic_words if w.strip())
+    return frozenset({
+        "signatory", "authorized", "representative", "admin", "administrator",
+        "team", "support", "sales", "contact", "management", "department",
+        "staff", "employee", "customer", "client", "user", "board", "member",
+        "officer", "director", "founder", "partner", "president", "legal",
+        "signature", "official", "attorney", "counsel", "anyone", "everyone",
+        "nobody", "someone", "candidate", "applicant"
+    })
+
+
 def _is_valid_person_name(text: str, config: DecisionMakerRolesConfig | None = None) -> bool:
     """Validate that text looks like a real person name using generic rules:
     - Must not contain invalid characters ('|', '/', '\\', '@', etc.)
+    - Must not end with sentence-ending punctuation ('.', '!', '?')
     - Must pass split_person_name(text)
-    - Must not contain marketing words loaded from config/decision_maker_roles.json
+    - Must not contain role, legal, generic, or marketing words loaded from config
     """
     if not text or not isinstance(text, str):
         return False
+    clean = text.strip()
+    if not clean:
+        return False
     # Check invalid punctuation/delimiter chars (pipes, slashes, emails, symbols)
-    if any(ch in text for ch in _INVALID_NAME_CHARS):
+    if any(ch in clean for ch in _INVALID_NAME_CHARS):
+        return False
+    # Person names should not end with sentence-ending punctuation or quotes
+    if clean.endswith((".", "!", "?", ";", ":", '"', "'", "”", "’")):
         return False
     # Must pass standard person name splitting (first + last name)
-    if not split_person_name(text):
+    split_res = split_person_name(clean)
+    if not split_res:
         return False
-    # Check for marketing / nav words
-    marketing_words = _get_marketing_words(config)
-    words = [w.lower().strip(".,'’\"()[]:") for w in re.split(r"[\s\-_]+", text) if w.strip()]
-    if any(w in marketing_words for w in words):
+    first, last = split_res
+
+    # Check for marketing and generic words from config
+    cfg = config or load_roles_config()
+    marketing_words = _get_marketing_words(cfg)
+    generic_words = _get_generic_words(cfg)
+
+    # Check all individual tokens
+    tokens = [w.lower().strip(".,'’\"()[]:") for w in re.split(r"[\s\-_]+", clean) if w.strip()]
+    if any(w in marketing_words or w in generic_words for w in tokens):
         return False
+
+    # Also verify the extracted first and last names themselves
+    first_clean = first.lower().strip()
+    last_clean = last.lower().strip()
+    if first_clean in marketing_words or first_clean in generic_words:
+        return False
+    if last_clean in marketing_words or last_clean in generic_words:
+        return False
+
     return True
+
+
+def check_officer_context(
+    cand: DecisionMakerCandidate,
+    page_html: str,
+    page_text: str,
+    target_domain: str,
+    config: DecisionMakerRolesConfig,
+) -> tuple[str, str]:
+    """Check surrounding context to determine if candidate is a genuine officer of target company.
+
+    Flags rows whose context suggests the person is NOT an officer (advisor,
+    investor, client, testimonial author, or leader at a different organization).
+    Sets cand.excluded_reason when excluded and returns (status, reason).
+    Does not drop rows.
+    """
+    cand.excluded_reason = ""
+
+    # Unavailable candidates stay as-is
+    if cand.verification_status == "unavailable":
+        return "unavailable", cand.reason
+
+    # JSON-LD persons explicitly defined under organization founders are verified by definition
+    if cand.extraction_method == "jsonld_person" and cand.verification_status == "verified":
+        return "verified", cand.reason
+
+    # Check if the title explicitly names a different organization
+    if title_names_other_org(cand.title, target_domain):
+        msg = f"Title indicates role at another organization: {cand.title}"
+        cand.excluded_reason = msg
+        return "unverified", msg
+    at_org_match = re.search(r"(?i)\b(?:at|@)\s+([A-Z][\w&.'’-]+)", cand.title or "")
+    if at_org_match:
+        org_name = at_org_match.group(1).lower()
+        dom_stem = target_domain.split(".")[0].lower() if target_domain else ""
+        if dom_stem and dom_stem not in org_name and org_name not in dom_stem:
+            msg = f"Title indicates role at another organization: {cand.title}"
+            cand.excluded_reason = msg
+            return "unverified", msg
+
+    # Next check DOM/HTML structure if page_html is available
+    if page_html and cand.full_name:
+        soup = BeautifulSoup(page_html, "html.parser")
+        matching = soup.find_all(lambda el: el.name not in ["script", "style", "html", "body"] and cand.full_name in el.get_text())
+        if matching:
+            name_el = min(matching, key=lambda el: len(el.get_text()))
+            curr = name_el
+            is_team_container = False
+            is_testimonial_container = False
+            is_advisor_container = False
+
+            while curr and curr != soup:
+                tag_name = curr.name.lower() if curr.name else ""
+                classes_and_id = " ".join(curr.get("class", [])) + " " + str(curr.get("id", ""))
+                c_id_lower = classes_and_id.lower()
+
+                if tag_name == "blockquote":
+                    is_testimonial_container = True
+
+                if any(w in c_id_lower for w in ["testimonial", "review", "feedback", "client-say", "client_story", "quote"]):
+                    is_testimonial_container = True
+
+                if any(w in c_id_lower for w in ["trusted-by", "trusted_by", "backed-by", "backed_by", "investor", "advisor", "advisory", "endorse", "partner"]):
+                    is_advisor_container = True
+
+                if any(w in c_id_lower for w in ["team", "leadership", "founder", "board-of-directors", "management"]):
+                    is_team_container = True
+
+                curr = curr.parent
+
+            # Testimonial and external endorsement contexts take precedence
+            if is_testimonial_container:
+                msg = "Context indicates client testimonial author rather than company officer"
+                cand.excluded_reason = msg
+                return "unverified", msg
+
+            if is_advisor_container:
+                msg = "Context indicates advisor, investor, or external endorsement rather than company officer"
+                cand.excluded_reason = msg
+                return "unverified", msg
+
+            if is_team_container:
+                return cand.verification_status, cand.reason
+
+            # Check closest preceding heading in the document
+            name_pos = page_html.find(cand.full_name)
+            if name_pos != -1:
+                closest_h = None
+                closest_h_pos = -1
+                for h_tag in ["h1", "h2", "h3", "h4"]:
+                    for match in re.finditer(rf"<{h_tag}[^>]*>(.*?)</{h_tag}>", page_html[:name_pos], re.IGNORECASE | re.DOTALL):
+                        if match.start() > closest_h_pos:
+                            closest_h_pos = match.start()
+                            closest_h = re.sub(r"<[^>]+>", " ", match.group(1)).strip().lower()
+
+                if closest_h:
+                    if any(w in closest_h for w in ["team", "leadership", "founder", "management", "executive", "directors"]):
+                        return cand.verification_status, cand.reason
+                    if any(w in closest_h for w in ["testimonial", "review", "what our clients say", "what people say", "client stories", "feedback"]):
+                        msg = "Context indicates client testimonial author rather than company officer"
+                        cand.excluded_reason = msg
+                        return "unverified", msg
+                    if any(w in closest_h for w in ["trusted by", "backed by", "investor", "advisor", "advisory", "partners"]):
+                        msg = "Context indicates advisor, investor, or external endorsement rather than company officer"
+                        cand.excluded_reason = msg
+                        return "unverified", msg
+
+    # Fallback to text window search (500 chars before, 300 chars after)
+    text_to_search = page_text or ""
+    pos = -1
+    if cand.evidence_text:
+        pos = text_to_search.find(cand.evidence_text[:60])
+    if pos == -1 and cand.full_name:
+        pos = text_to_search.find(cand.full_name)
+
+    if pos != -1:
+        c_start = max(0, pos - 500)
+        c_end = min(len(text_to_search), pos + len(cand.evidence_text) + 300)
+        context_window = text_to_search[c_start:c_end]
+        preceding_text = text_to_search[max(0, pos - 200):pos].lower()
+    else:
+        context_window = cand.evidence_text
+        preceding_text = ""
+
+    if re.search(r"\b(our\s+team|leadership\s+team|management\s+team|executive\s+team|board\s+of\s+directors)\b", preceding_text):
+        return cand.verification_status, cand.reason
+
+    patterns = config.external_context_patterns or {
+        "testimonial": r"(?i)\b(testimonials?|reviews?|client\s+stories|what\s+(?:our\s+)?clients?\s+say|what\s+people\s+say|customer\s+feedback)\b|[“”]",
+        "advisor_or_investor": r"(?i)\b(trusted\s+by|backed\s+by|investors?|advisors?|advisory\s+board|mentors?|portfolio\s+companies|our\s+partners)\b",
+    }
+
+    test_pat = patterns.get("testimonial", r"(?i)\b(testimonials?|reviews?|client\s+stories|what\s+(?:our\s+)?clients?\s+say|what\s+people\s+say|customer\s+feedback)\b|[“”]")
+    adv_pat = patterns.get("advisor_or_investor", r"(?i)\b(trusted\s+by|backed\s+by|investors?|advisors?|advisory\s+board|mentors?|portfolio\s+companies|our\s+partners)\b")
+
+    if re.search(test_pat, context_window):
+        msg = "Context indicates client testimonial author rather than company officer"
+        cand.excluded_reason = msg
+        return "unverified", msg
+
+    if re.search(adv_pat, context_window):
+        msg = "Context indicates advisor, investor, or external endorsement rather than company officer"
+        cand.excluded_reason = msg
+        return "unverified", msg
+
+    return cand.verification_status, cand.reason
 
 
 def _is_verbatim_evidence(evidence: str, page_html: str, page_text: str) -> bool:
@@ -242,28 +429,9 @@ def categorize_title(title: str, config: DecisionMakerRolesConfig) -> str | None
 
 
 def _clean_soup_for_people(soup: BeautifulSoup) -> None:
-    """Remove boilerplate noise, scripts, styles, forms, and testimonial sections."""
+    """Remove boilerplate noise, scripts, styles, and forms."""
     for tag in soup(["script", "style", "noscript", "svg", "form"]):
         tag.decompose()
-
-    # Decompose testimonials, quotes, reviews, and client quotes (AC4)
-    testimonial_pattern = re.compile(
-        r"(testimonials?|reviews?|client-say|customer-say|quotes?|blockquote)", re.I
-    )
-    for el in list(soup.find_all(True)):
-        if el.attrs is None or el.name in ("body", "html", "main"):
-            continue
-        cls = el.attrs.get("class", [])
-        classes = " ".join(cls) if isinstance(cls, list) else str(cls or "")
-        el_id = str(el.attrs.get("id", "") or "")
-        el_tag = el.name.lower()
-        if (
-            el_tag == "blockquote"
-            or testimonial_pattern.search(classes)
-            or testimonial_pattern.search(el_id)
-        ):
-            if not el.find(["main", "article"]):
-                el.decompose()
 
 
 def extract_people_from_jsonld(
@@ -792,12 +960,25 @@ async def find_decision_makers(
                         if norm_name not in norm_ev or norm_title not in norm_ev:
                             cand.verification_status = "unverified"
                             cand.reason = "Evidence text does not contain both name and title"
+
+                    # Check surrounding context to verify officer role justification
+                    v_stat, v_reason = check_officer_context(cand, raw_html, raw_text, target_domain, roles_config)
+                    cand.verification_status = v_stat
+                    if v_reason:
+                        cand.reason = v_reason
+
                     extracted_candidates.append(cand)
                 elif _is_verbatim_evidence(cand.full_name, raw_html, raw_text):
                     # Fall back to person's full name if card container was slightly wider, but cap at unverified
                     cand.evidence_text = cand.full_name
                     cand.verification_status = "unverified"
                     cand.reason = "Evidence container was wider than raw text; capped to unverified"
+
+                    v_stat, v_reason = check_officer_context(cand, raw_html, raw_text, target_domain, roles_config)
+                    cand.verification_status = v_stat
+                    if v_reason:
+                        cand.reason = v_reason
+
                     extracted_candidates.append(cand)
                 else:
                     logger.debug("Discarded non-verbatim candidate %s on %s", cand.full_name, p_url)
@@ -839,13 +1020,19 @@ async def find_decision_makers(
         p.full_name
     ))
 
+    # Count real (non-excluded and not unavailable) decision makers
+    real_decision_makers = [p for p in final_people if not getattr(p, "excluded_reason", "") and p.verification_status != "unavailable"]
+
     # If no decision makers found, record exactly ONE unavailable row with precise reason (AC7)
-    if not final_people:
-        reason_msg = f"{scanned_pages_count} pages scanned, no named leadership found"
-        if js_rendered_pages:
-            reason_msg += f" (pages empty or client-side JavaScript rendered: {', '.join(js_rendered_pages[:2])})"
+    if not real_decision_makers:
+        if any(getattr(p, "excluded_reason", "") for p in final_people):
+            reason_msg = "only testimonial/advisor-context names found"
+        elif js_rendered_pages:
+            reason_msg = f"{scanned_pages_count} pages scanned, no named leadership found (pages empty or client-side JavaScript rendered: {', '.join(js_rendered_pages[:2])})"
         elif scanned_pages_count == 0:
             reason_msg = "0 relevant source pages found for this domain"
+        else:
+            reason_msg = f"{scanned_pages_count} pages scanned, no named leadership found"
 
         final_people.append(DecisionMakerCandidate(
             full_name="unavailable",
@@ -858,6 +1045,7 @@ async def find_decision_makers(
             verification_status="unavailable",
             extraction_method="none",
             reason=reason_msg,
+            excluded_reason="",
         ))
 
     # Persist to database
@@ -879,6 +1067,7 @@ async def find_decision_makers(
             extraction_method=p.extraction_method,
             also_seen_urls_json=json.dumps(p.also_seen_urls),
             reason=p.reason,
+            excluded_reason=getattr(p, "excluded_reason", ""),
         )
 
     stage_end = _utcnow().isoformat()
@@ -889,7 +1078,7 @@ async def find_decision_makers(
     # Category counts
     counts_by_category = {}
     for r in role_priority:
-        cnt = sum(1 for p in final_people if p.role_category == r and p.verification_status != "unavailable")
+        cnt = sum(1 for p in final_people if p.role_category == r and p.verification_status != "unavailable" and not getattr(p, "excluded_reason", ""))
         if cnt > 0:
             counts_by_category[r] = cnt
 
