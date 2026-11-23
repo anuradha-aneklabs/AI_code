@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass, field
+import difflib
 import json
 import logging
 from pathlib import Path
@@ -32,6 +33,33 @@ logger = logging.getLogger("harvey.company_narrative")
 
 
 @dataclass
+class ServiceFilteringRules:
+    """Configured rules for filtering and prioritizing high-quality service names."""
+    cta_verbs: list[str] = field(default_factory=lambda: [
+        "schedule", "book", "get", "contact", "request", "start",
+        "talk", "learn", "join", "download", "sign up", "sign-up",
+        "hire", "call", "try", "explore", "view", "see", "read",
+        "find", "check", "click", "subscribe", "tell", "lets", "let's"
+    ])
+    drop_patterns: list[str] = field(default_factory=lambda: [
+        r"^\d+[%+]?\s*",
+        r"^\d+[\.:]\s*",
+        r"^[\"'“‘].*[\"'”’]$",
+        r"^testimonial",
+        r"\b(quote|pricing|case study|faq|faqs|review|rating|award|clutch|upwork)\b",
+        r"^(you|your|we|our|us|they|i|one|every|all)\b",
+    ])
+    non_service_section_phrases: list[str] = field(default_factory=lambda: [
+        "process", "how it works", "how we work", "tech stack", "faq", "faqs",
+        "why us", "why choose", "stories", "testimonials", "reviews", "pricing",
+        "leadership", "team", "careers", "what we’ve built", "what we've built"
+    ])
+    max_service_name_chars: int = 80
+    max_service_words: int = 10
+    similarity_threshold: float = 0.7
+
+
+@dataclass
 class NarrativeRules:
     """Configured rules for company narrative extraction."""
     heading_phrases: dict[str, list[str]] = field(default_factory=lambda: {
@@ -41,16 +69,19 @@ class NarrativeRules:
         "product_service": [
             "what we do", "our services", "services", "products",
             "solutions", "offerings", "platform",
+            "specialized services", "core services",
         ],
     })
     confidence: dict[str, float] = field(default_factory=lambda: {
         "jsonld": 1.0,
         "heading_section": 0.9,
         "list_under_heading": 0.9,
+        "card_title": 0.95,
         "meta_description": 0.4,
     })
     max_section_chars: int = 1200
     max_list_items: int = 20
+    service_filtering: ServiceFilteringRules = field(default_factory=ServiceFilteringRules)
 
 
 def load_narrative_rules(config_path: str | Path | None = None) -> NarrativeRules:
@@ -69,16 +100,107 @@ def load_narrative_rules(config_path: str | Path | None = None) -> NarrativeRule
         if p.exists() and p.is_file():
             try:
                 data = json.loads(p.read_text(encoding="utf-8"))
+                filt_data = data.get("service_filtering", {})
+                service_filt = ServiceFilteringRules(
+                    cta_verbs=filt_data.get("cta_verbs", ServiceFilteringRules().cta_verbs),
+                    drop_patterns=filt_data.get("drop_patterns", ServiceFilteringRules().drop_patterns),
+                    non_service_section_phrases=filt_data.get(
+                        "non_service_section_phrases", ServiceFilteringRules().non_service_section_phrases
+                    ),
+                    max_service_name_chars=int(filt_data.get("max_service_name_chars", 80)),
+                    max_service_words=int(filt_data.get("max_service_words", 10)),
+                    similarity_threshold=float(filt_data.get("similarity_threshold", 0.7)),
+                )
                 return NarrativeRules(
                     heading_phrases=data.get("heading_phrases", {}),
                     confidence=data.get("confidence", {}),
                     max_section_chars=int(data.get("max_section_chars", 1200)),
                     max_list_items=int(data.get("max_list_items", 20)),
+                    service_filtering=service_filt,
                 )
             except Exception as e:
                 logger.warning("Failed to load narrative rules from %s: %s", p, e)
 
     return NarrativeRules()
+
+
+def is_valid_service_name(name: str, rules: NarrativeRules | None = None) -> tuple[bool, str]:
+    """Validate whether an extracted string qualifies as a legitimate service name.
+    
+    Drops:
+    1. Items starting with action verbs used for calls to action.
+    2. Items that are mostly numbers, metrics, or percentages.
+    3. Testimonials or quote-like text.
+    4. Strings exceeding maximum configured length or word count.
+    5. Pure generic single words or FAQ questions.
+    """
+    active_rules = rules or NarrativeRules()
+    filt = active_rules.service_filtering
+    norm = _normalize_ws(name)
+    if not norm:
+        return False, "empty"
+
+    words = norm.split()
+    if len(norm) > filt.max_service_name_chars or len(words) > filt.max_service_words:
+        return False, f"too_long ({len(norm)} chars, {len(words)} words)"
+
+    if norm.endswith("?") or re.match(r"^q\d+", norm, re.I):
+        return False, "question_or_faq"
+
+    first_word = words[0].lower().rstrip(":,.-")
+    two_words = f"{words[0]} {words[1]}".lower() if len(words) > 1 else ""
+    cta_set = set(v.lower() for v in filt.cta_verbs)
+    if first_word in cta_set or two_words in cta_set:
+        return False, f"cta_verb ({first_word})"
+
+    for pat in filt.drop_patterns:
+        if re.search(pat, norm, re.I):
+            return False, f"matches_drop_pattern ({pat})"
+
+    if len(words) == 1 and norm.lower() in {
+        "scope", "design", "build", "harden", "run", "services",
+        "solutions", "products", "overview", "more", "details"
+    }:
+        return False, "generic_single_word"
+
+    return True, "ok"
+
+
+def filter_and_deduplicate_services(
+    services: list[Finding],
+    rules: NarrativeRules | None = None,
+) -> list[Finding]:
+    """Filter candidate service findings and deduplicate near-duplicates by normalized similarity."""
+    active_rules = rules or NarrativeRules()
+    filt = active_rules.service_filtering
+    valid_candidates: list[Finding] = []
+
+    for s in services:
+        valid, reason = is_valid_service_name(s.value_text, active_rules)
+        if valid:
+            valid_candidates.append(s)
+        else:
+            logger.debug("Dropped candidate service '%s': %s", s.value_text[:50], reason)
+
+    unique: list[Finding] = []
+    for cand in valid_candidates:
+        c_norm = re.sub(r"[^a-z0-9]", "", cand.value_text.lower())
+        if not c_norm:
+            continue
+        is_dup = False
+        for u in unique:
+            u_norm = re.sub(r"[^a-z0-9]", "", u.value_text.lower())
+            if c_norm == u_norm:
+                is_dup = True
+                break
+            ratio = difflib.SequenceMatcher(None, c_norm, u_norm).ratio()
+            if ratio >= filt.similarity_threshold:
+                is_dup = True
+                break
+        if not is_dup:
+            unique.append(cand)
+
+    return unique
 
 
 @dataclass
@@ -248,6 +370,36 @@ def extract_from_headings(
     soup = BeautifulSoup(raw_html, "html.parser")
     _clean_soup_for_headings(soup)
 
+    non_service_phrases = rules.service_filtering.non_service_section_phrases
+    seen_values: set[str] = set()
+
+    # 1. On services pages, scan card headings and individual service blocks
+    parsed_path = urlparse(source_url).path.lower()
+    is_services_page = any(seg in parsed_path for seg in ("services", "solutions", "what-we-do", "offerings"))
+
+    if is_services_page:
+        for h in soup.find_all(re.compile(r"^h[2-4]$", re.I)):
+            h_text = _normalize_ws(h.get_text())
+            if not h_text or any(p in h_text.lower() for p in non_service_phrases):
+                continue
+            if h_text.lower() in ("services", "our services", "what we do", "custom software development services", "specialized services"):
+                continue
+            valid, _ = is_valid_service_name(h_text, rules)
+            if valid and h_text not in seen_values:
+                seen_values.add(h_text)
+                findings.append(Finding(
+                    finding_type="product_service",
+                    value_text=h_text,
+                    evidence_text=h_text,
+                    source_url=source_url,
+                    source_page_id=page_id,
+                    domain=domain,
+                    confidence=rules.confidence.get("card_title", 0.95),
+                    verification_status="verified",
+                    extraction_method="card_title",
+                ))
+
+    # 2. General section & heading extraction
     heading_tags = soup.find_all(re.compile(r"^h[1-6]$", re.I))
 
     # Pre-compile heading matchers
@@ -262,11 +414,13 @@ def extract_from_headings(
         ]
         matchers.append((ftype, patterns))
 
-    seen_values: set[str] = set()
-
     for h in heading_tags:
         h_text = _normalize_ws(h.get_text())
         if not h_text:
+            continue
+
+        # Skip sections that are explicitly non-service (process, team, faq, etc.)
+        if any(p in h_text.lower() for p in non_service_phrases):
             continue
 
         matched_type: str | None = None
@@ -299,7 +453,26 @@ def extract_from_headings(
                 curr_parent_sib = curr_parent_sib.next_sibling
 
         if matched_type == "product_service":
-            # 1. Look for lists (ul, ol)
+            # Extract card titles inside child containers
+            for sib in sibling_elements:
+                for card_h in sib.find_all(["h3", "h4", "h5", "strong"]):
+                    card_title = _normalize_ws(card_h.get_text())
+                    valid, _ = is_valid_service_name(card_title, rules)
+                    if valid and card_title not in seen_values:
+                        seen_values.add(card_title)
+                        findings.append(Finding(
+                            finding_type="product_service",
+                            value_text=card_title,
+                            evidence_text=card_title,
+                            source_url=source_url,
+                            source_page_id=page_id,
+                            domain=domain,
+                            confidence=rules.confidence.get("card_title", 0.95),
+                            verification_status="verified",
+                            extraction_method="card_title",
+                        ))
+
+            # Look for lists (ul, ol)
             list_tag: Tag | None = None
             for sib in sibling_elements:
                 if sib.name in ("ul", "ol"):
@@ -314,11 +487,27 @@ def extract_from_headings(
                 items = list_tag.find_all("li")[:rules.max_list_items]
                 for li in items:
                     li_text = _normalize_ws(li.get_text(separator=" ", strip=True))
-                    if li_text and li_text not in seen_values:
+                    if not li_text or li_text in seen_values:
+                        continue
+                    # Prefer short noun-phrase from inner title or separator
+                    inner_title = li.find(["h3", "h4", "h5", "h6", "strong", "b"])
+                    if inner_title:
+                        short_name = _normalize_ws(inner_title.get_text())
+                    else:
+                        short_name = li_text
+                        for sep in (" — ", " - ", ": ", " | "):
+                            if sep in li_text:
+                                left = li_text.split(sep, 1)[0].strip()
+                                if len(left.split()) <= rules.service_filtering.max_service_words:
+                                    short_name = left
+                                    break
+
+                    valid, _ = is_valid_service_name(short_name, rules)
+                    if valid:
                         seen_values.add(li_text)
                         findings.append(Finding(
                             finding_type="product_service",
-                            value_text=li_text,
+                            value_text=short_name,
                             evidence_text=li_text,
                             source_url=source_url,
                             source_page_id=page_id,
@@ -351,6 +540,11 @@ def extract_from_headings(
                     section_text = truncated.strip()
 
             if section_text and section_text not in seen_values:
+                # If matched_type is product_service, ensure section_text passes service validation
+                if matched_type == "product_service":
+                    valid, _ = is_valid_service_name(section_text, rules)
+                    if not valid:
+                        continue
                 seen_values.add(section_text)
                 findings.append(Finding(
                     finding_type=matched_type,
@@ -529,18 +723,19 @@ async def extract_company_narrative(
             final_findings.append(matches[0])
 
     # For product_service:
-    services = [f for f in extracted_findings if f.finding_type == "product_service"]
-    seen_service_texts: set[str] = set()
-    for s in services[:rules.max_list_items]:
-        if s.value_text not in seen_service_texts:
-            seen_service_texts.add(s.value_text)
-            final_findings.append(s)
+    raw_services = [f for f in extracted_findings if f.finding_type == "product_service"]
+    filtered_services = filter_and_deduplicate_services(raw_services, rules)
+    for s in filtered_services[:rules.max_list_items]:
+        final_findings.append(s)
 
     # Unavailable handling: Ensure all 4 finding types are accounted for (AC3, AC10)
     all_types = ["overview", "vision", "mission", "product_service"]
     for t in all_types:
         if not any(f.finding_type == t for f in final_findings):
-            reason_msg = "No matching heading, jsonld, or meta description found in fetched pages"
+            if t == "product_service":
+                reason_msg = "no clear service list found"
+            else:
+                reason_msg = "No matching heading, jsonld, or meta description found in fetched pages"
             if not pages:
                 reason_msg = "No source pages fetched for this domain"
             elif all(p.get("extraction_status") != "fetched" for p in pages):

@@ -55,14 +55,23 @@ async def test_batch_export_findings_with_statuses(temp_state, tmp_path):
         confidence=0.95,
     )
     # 7 services (all verified) -> only top 5 should be exported
-    for i in range(1, 8):
+    sample_services = [
+        "Cloud Migration",
+        "Kubernetes Orchestration",
+        "Security Auditing",
+        "Database Optimization",
+        "CI/CD Pipeline Setup",
+        "Monitoring Solutions",
+        "Cost Optimization",
+    ]
+    for i, s_name in enumerate(sample_services, 1):
         await temp_state.save_research_finding(
             finding_id=f"f_svc_{i}",
             run_id=run_id,
             extraction_run_id=ext_id,
             domain=domain,
             finding_type="product_service",
-            value_text=f"Service Feature {i}",
+            value_text=s_name,
             verification_status="verified",
             confidence=0.9,
         )
@@ -128,10 +137,10 @@ async def test_batch_export_findings_with_statuses(temp_state, tmp_path):
 
         # Services: capped at 5 and includes status
         services_field = row["services"]
-        assert "Service Feature 1 [verified]" in services_field
-        assert "Service Feature 5 [verified]" in services_field
-        assert "Service Feature 6" not in services_field
-        assert "Service Feature 7" not in services_field
+        assert "Cloud Migration [verified]" in services_field
+        assert "CI/CD Pipeline Setup [verified]" in services_field
+        assert "Monitoring Solutions" not in services_field
+        assert "Cost Optimization" not in services_field
         assert len(services_field.split("; ")) == 5
 
         # Decision makers

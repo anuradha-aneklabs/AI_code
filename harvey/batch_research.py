@@ -9,6 +9,7 @@ progressively after each domain, and exports comprehensive results.
 from __future__ import annotations
 
 import csv
+import difflib
 import hashlib
 import io
 import json
@@ -20,7 +21,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from harvey.company_narrative import extract_company_narrative
+from harvey.company_narrative import extract_company_narrative, is_valid_service_name
 from harvey.decision_makers import find_decision_makers
 from harvey.single_domain_research import (
     load_free_email_providers,
@@ -676,26 +677,41 @@ async def export_batch_results(
                             if isinstance(parsed, list):
                                 for p in parsed:
                                     p_str = str(p).strip()
-                                    if p_str:
+                                    if p_str and is_valid_service_name(p_str)[0]:
                                         formatted_p = f"{p_str} [{s_stat}]" if not p_str.endswith(f"[{s_stat}]") else p_str
                                         extracted_services.append(formatted_p)
                                 continue
                         except Exception:
                             pass
                     raw_str = str(raw_val).strip()
-                    if raw_str:
+                    if raw_str and is_valid_service_name(raw_str)[0]:
                         formatted_s = f"{raw_str} [{s_stat}]" if not raw_str.endswith(f"[{s_stat}]") else raw_str
                         extracted_services.append(formatted_s)
 
-                if extracted_services:
-                    services_val = "; ".join(extracted_services[:5])
+                # Deduplicate by similarity threshold
+                unique_export_services: list[str] = []
+                for es in extracted_services:
+                    core_name = re.sub(r"\s*\[[^\]]+\]$", "", es).strip().lower()
+                    core_norm = re.sub(r"[^a-z0-9]", "", core_name)
+                    if not any(
+                        difflib.SequenceMatcher(
+                            None,
+                            core_norm,
+                            re.sub(r"[^a-z0-9]", "", re.sub(r"\s*\[[^\]]+\]$", "", u).strip().lower())
+                        ).ratio() > 0.7
+                        for u in unique_export_services
+                    ):
+                        unique_export_services.append(es)
+
+                if unique_export_services:
+                    services_val = "; ".join(unique_export_services[:5])
                 else:
                     unavail_svc = [
                         f for f in (by_type.get("product_service", []) + by_type.get("services", []))
                         if f.get("verification_status") == "unavailable" or f.get("status") == "unavailable" or f.get("reason")
                     ]
-                    reason = unavail_svc[0].get("reason") if unavail_svc else "Services list not found on scanned pages"
-                    services_val = f"unavailable: {reason or 'Services list not found on scanned pages'}"
+                    reason = unavail_svc[0].get("reason") if unavail_svc else ""
+                    services_val = f"unavailable: {reason or 'no clear service list found'}"
 
                 # Decision makers: format as "Name - Title [status]"
                 # Excluded rows never appear!

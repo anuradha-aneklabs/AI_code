@@ -22,15 +22,78 @@
       "products",
       "solutions",
       "offerings",
-      "platform"
+      "platform",
+      "specialized services",
+      "core services"
     ]
   },
   "confidence": {
     "jsonld": 1.0,
     "heading_section": 0.9,
     "list_under_heading": 0.9,
+    "card_title": 0.95,
     "meta_description": 0.4
   },
   "max_section_chars": 1200,
-  "max_list_items": 20
+  "max_list_items": 20,
+  "service_filtering": {
+    "cta_verbs": [
+      "schedule",
+      "book",
+      "get",
+      "contact",
+      "request",
+      "start",
+      "talk",
+      "learn",
+      "join",
+      "download",
+      "sign up",
+      "sign-up",
+      "hire",
+      "call",
+      "try",
+      "explore",
+      "view",
+      "see",
+      "read",
+      "find",
+      "check",
+      "click",
+      "subscribe",
+      "tell",
+      "lets",
+      "let's"
+    ],
+    "drop_patterns": [
+      "^\\d+[%+]?\\s*",
+      "^\\d+[\\.:]\\s*",
+      "^[\\\"'“‘].*[\\\"'”’]$",
+      "^testimonial",
+      "\\b(quote|pricing|case study|faq|faqs|review|rating|award|clutch|upwork)\\b",
+      "^(you|your|we|our|us|they|i|one|every|all)\\b"
+    ],
+    "non_service_section_phrases": [
+      "process",
+      "how it works",
+      "how we work",
+      "tech stack",
+      "faq",
+      "faqs",
+      "why us",
+      "why choose",
+      "stories",
+      "testimonials",
+      "reviews",
+      "pricing",
+      "leadership",
+      "team",
+      "careers",
+      "what we’ve built",
+      "what we've built"
+    ],
+    "max_service_name_chars": 80,
+    "max_service_words": 10,
+    "similarity_threshold": 0.7
+  }
 }
