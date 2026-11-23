@@ -909,6 +909,56 @@ MIGRATIONS: list[str] = [
     """
     ALTER TABLE research_people ADD COLUMN excluded_reason TEXT DEFAULT '';
     """,
+    # ── v30: batch research tables ──
+    """
+    CREATE TABLE IF NOT EXISTS import_batches (
+        id TEXT PRIMARY KEY,
+        source_filename TEXT NOT NULL,
+        source_sha256 TEXT NOT NULL,
+        status TEXT DEFAULT 'pending',
+        total_rows INTEGER DEFAULT 0,
+        valid_rows INTEGER DEFAULT 0,
+        unique_domains INTEGER DEFAULT 0,
+        max_domains INTEGER DEFAULT 5,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        started_at TIMESTAMP,
+        finished_at TIMESTAMP,
+        error_summary TEXT DEFAULT ''
+    );
+    CREATE INDEX IF NOT EXISTS idx_import_batches_status ON import_batches(status);
+
+    CREATE TABLE IF NOT EXISTS import_rows (
+        id TEXT PRIMARY KEY,
+        batch_id TEXT NOT NULL REFERENCES import_batches(id),
+        row_number INTEGER NOT NULL,
+        raw_name TEXT DEFAULT '',
+        raw_email TEXT DEFAULT '',
+        raw_phone TEXT DEFAULT '',
+        normalized_email TEXT DEFAULT '',
+        domain TEXT DEFAULT '',
+        row_status TEXT NOT NULL,
+        error TEXT DEFAULT '',
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE INDEX IF NOT EXISTS idx_import_rows_batch_id ON import_rows(batch_id);
+    CREATE INDEX IF NOT EXISTS idx_import_rows_domain ON import_rows(batch_id, domain);
+
+    CREATE TABLE IF NOT EXISTS import_domains (
+        id TEXT PRIMARY KEY,
+        batch_id TEXT NOT NULL REFERENCES import_batches(id),
+        domain TEXT NOT NULL,
+        representative_email TEXT NOT NULL,
+        run_id TEXT DEFAULT '',
+        status TEXT DEFAULT 'pending',
+        stage_summary_json TEXT DEFAULT '{}',
+        error TEXT DEFAULT '',
+        started_at TIMESTAMP,
+        finished_at TIMESTAMP,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE INDEX IF NOT EXISTS idx_import_domains_batch_id ON import_domains(batch_id);
+    CREATE INDEX IF NOT EXISTS idx_import_domains_status ON import_domains(batch_id, status);
+    """,
 ]
 
 CRM_PIPELINE_STAGES: list[str] = [
@@ -5579,6 +5629,222 @@ class StateManager:
                 (location_status, location_evidence, location_evidence_url, _utcnow().isoformat(), company_id),
             )
             await db.commit()
+
+    # ── Batch Research (Milestone 4) ──
+
+    async def create_import_batch(
+        self,
+        *,
+        batch_id: str,
+        source_filename: str,
+        source_sha256: str,
+        total_rows: int = 0,
+        valid_rows: int = 0,
+        unique_domains: int = 0,
+        max_domains: int = 5,
+        status: str = "pending",
+        created_at: str | None = None,
+    ) -> str:
+        """Create a new import batch record."""
+        created = created_at or _utcnow().isoformat()
+        async with self._connect() as db:
+            await db.execute(
+                """
+                INSERT INTO import_batches (
+                    id, source_filename, source_sha256, status,
+                    total_rows, valid_rows, unique_domains, max_domains, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    batch_id, source_filename, source_sha256, status,
+                    total_rows, valid_rows, unique_domains, max_domains, created,
+                ),
+            )
+            await db.commit()
+        return batch_id
+
+    async def get_import_batch(self, batch_id: str) -> dict[str, Any] | None:
+        """Retrieve an import batch by ID."""
+        async with self._connect() as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute("SELECT * FROM import_batches WHERE id = ?", (batch_id,)) as cur:
+                row = await cur.fetchone()
+                return dict(row) if row else None
+
+    async def update_import_batch_status(
+        self,
+        batch_id: str,
+        *,
+        status: str,
+        started_at: str | None = None,
+        finished_at: str | None = None,
+        error_summary: str = "",
+    ) -> None:
+        """Update batch execution status and timestamps."""
+        async with self._connect() as db:
+            updates = ["status = ?"]
+            params: list[Any] = [status]
+            if started_at is not None:
+                updates.append("started_at = ?")
+                params.append(started_at)
+            if finished_at is not None:
+                updates.append("finished_at = ?")
+                params.append(finished_at)
+            if error_summary:
+                updates.append("error_summary = ?")
+                params.append(error_summary)
+            params.append(batch_id)
+            sql = f"UPDATE import_batches SET {', '.join(updates)} WHERE id = ?"
+            await db.execute(sql, tuple(params))
+            await db.commit()
+
+    async def save_import_row(
+        self,
+        *,
+        row_id: str,
+        batch_id: str,
+        row_number: int,
+        raw_name: str = "",
+        raw_email: str = "",
+        raw_phone: str = "",
+        normalized_email: str = "",
+        domain: str = "",
+        row_status: str,
+        error: str = "",
+        created_at: str | None = None,
+    ) -> str:
+        """Persist a single import row."""
+        created = created_at or _utcnow().isoformat()
+        async with self._connect() as db:
+            await db.execute(
+                """
+                INSERT INTO import_rows (
+                    id, batch_id, row_number, raw_name, raw_email, raw_phone,
+                    normalized_email, domain, row_status, error, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    row_id, batch_id, row_number, raw_name, raw_email, raw_phone,
+                    normalized_email, domain, row_status, error, created,
+                ),
+            )
+            await db.commit()
+        return row_id
+
+    async def save_import_rows_bulk(self, rows_data: list[dict[str, Any]]) -> None:
+        """Persist multiple import rows efficiently in a single transaction."""
+        if not rows_data:
+            return
+        async with self._connect() as db:
+            await db.executemany(
+                """
+                INSERT INTO import_rows (
+                    id, batch_id, row_number, raw_name, raw_email, raw_phone,
+                    normalized_email, domain, row_status, error, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                [
+                    (
+                        r["id"], r["batch_id"], r["row_number"],
+                        r.get("raw_name", ""), r.get("raw_email", ""), r.get("raw_phone", ""),
+                        r.get("normalized_email", ""), r.get("domain", ""),
+                        r["row_status"], r.get("error", ""), r.get("created_at") or _utcnow().isoformat(),
+                    )
+                    for r in rows_data
+                ],
+            )
+            await db.commit()
+
+    async def get_import_rows(self, batch_id: str) -> list[dict[str, Any]]:
+        """Retrieve all rows for an import batch, ordered by row_number."""
+        async with self._connect() as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(
+                "SELECT * FROM import_rows WHERE batch_id = ? ORDER BY row_number ASC",
+                (batch_id,),
+            ) as cur:
+                rows = await cur.fetchall()
+                return [dict(r) for r in rows]
+
+    async def save_import_domain(
+        self,
+        *,
+        domain_id: str,
+        batch_id: str,
+        domain: str,
+        representative_email: str,
+        run_id: str = "",
+        status: str = "pending",
+        stage_summary_json: str = "{}",
+        error: str = "",
+        started_at: str | None = None,
+        finished_at: str | None = None,
+        created_at: str | None = None,
+    ) -> str:
+        """Persist an import domain record."""
+        created = created_at or _utcnow().isoformat()
+        async with self._connect() as db:
+            await db.execute(
+                """
+                INSERT INTO import_domains (
+                    id, batch_id, domain, representative_email, run_id,
+                    status, stage_summary_json, error, started_at, finished_at, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    domain_id, batch_id, domain, representative_email, run_id,
+                    status, stage_summary_json, error, started_at, finished_at, created,
+                ),
+            )
+            await db.commit()
+        return domain_id
+
+    async def update_import_domain_status(
+        self,
+        batch_id: str,
+        domain: str,
+        *,
+        status: str,
+        run_id: str | None = None,
+        stage_summary_json: str | None = None,
+        error: str | None = None,
+        started_at: str | None = None,
+        finished_at: str | None = None,
+    ) -> None:
+        """Update domain processing status, research run_id, and stage summary."""
+        async with self._connect() as db:
+            updates = ["status = ?"]
+            params: list[Any] = [status]
+            if run_id is not None:
+                updates.append("run_id = ?")
+                params.append(run_id)
+            if stage_summary_json is not None:
+                updates.append("stage_summary_json = ?")
+                params.append(stage_summary_json)
+            if error is not None:
+                updates.append("error = ?")
+                params.append(error)
+            if started_at is not None:
+                updates.append("started_at = ?")
+                params.append(started_at)
+            if finished_at is not None:
+                updates.append("finished_at = ?")
+                params.append(finished_at)
+            params.extend([batch_id, domain])
+            sql = f"UPDATE import_domains SET {', '.join(updates)} WHERE batch_id = ? AND domain = ?"
+            await db.execute(sql, tuple(params))
+            await db.commit()
+
+    async def get_import_domains(self, batch_id: str) -> list[dict[str, Any]]:
+        """Retrieve all domains for an import batch."""
+        async with self._connect() as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(
+                "SELECT * FROM import_domains WHERE batch_id = ? ORDER BY created_at ASC, id ASC",
+                (batch_id,),
+            ) as cur:
+                rows = await cur.fetchall()
+                return [dict(r) for r in rows]
 
 
 

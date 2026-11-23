@@ -1,0 +1,31 @@
+{
+  "email": [
+    "email",
+    "e-mail",
+    "email address",
+    "e-mail address",
+    "contact email",
+    "work email",
+    "email_address",
+    "mail"
+  ],
+  "name": [
+    "name",
+    "full name",
+    "full_name",
+    "contact name",
+    "contact_name",
+    "person",
+    "lead name",
+    "first and last name"
+  ],
+  "phone": [
+    "phone",
+    "mobile",
+    "contact number",
+    "phone number",
+    "phone_number",
+    "telephone",
+    "cell"
+  ]
+}

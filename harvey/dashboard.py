@@ -600,6 +600,120 @@ async def api_find_decision_makers(run_id: str, request: Request):
         return JSONResponse({"success": False, "error": str(e)}, status_code=500)
 
 
+@app.post("/api/research/batch")
+async def api_create_research_batch(request: Request):
+    """Upload and validate an Excel/CSV contact list for batch research."""
+    try:
+        from harvey.batch_research import create_batch_from_file
+        state = _state()
+        await state.init_db()
+
+        content_type = request.headers.get("content-type", "")
+        content_bytes = b""
+        filename = "contacts.csv"
+        max_domains = 5
+
+        if "multipart/form-data" in content_type:
+            form = await request.form()
+            upload_file = form.get("file")
+            if upload_file is not None:
+                filename = getattr(upload_file, "filename", "contacts.csv") or "contacts.csv"
+                content_bytes = await upload_file.read()
+            if "max_domains" in form:
+                try:
+                    max_domains = int(form["max_domains"])
+                except Exception:
+                    pass
+        elif "application/json" in content_type:
+            data = await request.json()
+            filename = data.get("filename", "contacts.csv")
+            max_domains = int(data.get("max_domains", 5))
+            if "content" in data:
+                raw_val = data["content"]
+                if isinstance(raw_val, str):
+                    content_bytes = raw_val.encode("utf-8")
+                elif isinstance(raw_val, bytes):
+                    content_bytes = raw_val
+            elif "data_b64" in data:
+                import base64
+                b64 = data["data_b64"]
+                if "," in b64:
+                    b64 = b64.split(",", 1)[1]
+                content_bytes = base64.b64decode(b64)
+        else:
+            content_bytes = await request.body()
+            qp = request.query_params
+            filename = qp.get("filename", "contacts.csv")
+            if "max_domains" in qp:
+                try:
+                    max_domains = int(qp["max_domains"])
+                except Exception:
+                    pass
+
+        if not content_bytes:
+            return JSONResponse({"success": False, "error": "No file content uploaded"}, status_code=400)
+
+        preview_res = await create_batch_from_file(
+            content_bytes=content_bytes,
+            filename=filename,
+            state=state,
+            max_domains=max_domains,
+        )
+        return {"success": True, "batch": preview_res}
+    except ValueError as e:
+        return JSONResponse({"success": False, "error": str(e)}, status_code=400)
+    except Exception as e:
+        logger.exception("Batch creation failed")
+        return JSONResponse({"success": False, "error": str(e)}, status_code=500)
+
+
+@app.get("/api/research/batch/{batch_id}")
+async def api_get_research_batch_status(batch_id: str):
+    """Retrieve batch status and per-domain research progress."""
+    try:
+        state = _state()
+        await state.init_db()
+        batch = await state.get_import_batch(batch_id)
+        if not batch:
+            return JSONResponse({"success": False, "error": f"Batch '{batch_id}' not found"}, status_code=404)
+        domains = await state.get_import_domains(batch_id)
+        return {"success": True, "batch": batch, "domains": domains}
+    except Exception as e:
+        logger.exception("Failed to get batch %s", batch_id)
+        return JSONResponse({"success": False, "error": str(e)}, status_code=500)
+
+
+@app.get("/api/research/batch/{batch_id}/export")
+async def api_export_research_batch(batch_id: str, request: Request):
+    """Export and download research batch results as CSV."""
+    try:
+        from starlette.responses import FileResponse
+        from harvey.batch_research import export_batch_results
+        state = _state()
+        await state.init_db()
+        batch = await state.get_import_batch(batch_id)
+        if not batch:
+            return JSONResponse({"success": False, "error": f"Batch '{batch_id}' not found"}, status_code=404)
+
+        export_paths = await export_batch_results(batch_id, state=state)
+        target = request.query_params.get("type", "contacts")
+        if target == "decision_makers":
+            file_to_send = export_paths["decision_makers"]
+            media_name = f"decision_makers_{batch_id}.csv"
+        else:
+            file_to_send = export_paths["contacts_results"]
+            media_name = f"contacts_results_{batch_id}.csv"
+
+        return FileResponse(
+            path=file_to_send,
+            filename=media_name,
+            media_type="text/csv",
+        )
+    except Exception as e:
+        logger.exception("Failed to export batch %s", batch_id)
+        return JSONResponse({"success": False, "error": str(e)}, status_code=500)
+
+
 @app.post("/api/trulyinbox/connect")
 async def trulyinbox_connect(request: Request):
     """Check a TrulyInbox key against the sending mailbox, then save it to .env."""
