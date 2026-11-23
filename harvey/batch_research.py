@@ -576,7 +576,7 @@ async def export_batch_results(
     ]
 
     with open(contacts_csv_path, "w", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(f, fieldnames=contact_fieldnames)
+        writer = csv.DictWriter(f, fieldnames=contact_fieldnames, quoting=csv.QUOTE_MINIMAL)
         writer.writeheader()
 
         for r in rows:
@@ -588,12 +588,24 @@ async def export_batch_results(
                 run_id = run_data["id"]
                 website = run_data.get("website") or {}
                 findings_raw = run_data.get("findings") or []
+                findings_list: list[dict[str, Any]] = []
                 if isinstance(findings_raw, list):
-                    findings = {f.get("finding_type"): f for f in findings_raw if isinstance(f, dict)}
+                    findings_list = [f for f in findings_raw if isinstance(f, dict)]
                 elif isinstance(findings_raw, dict):
-                    findings = findings_raw
-                else:
-                    findings = {}
+                    for k, v in findings_raw.items():
+                        if isinstance(v, list):
+                            findings_list.extend([x for x in v if isinstance(x, dict)])
+                        elif isinstance(v, dict):
+                            item = dict(v)
+                            if "finding_type" not in item:
+                                item["finding_type"] = k
+                            findings_list.append(item)
+
+                by_type: dict[str, list[dict[str, Any]]] = {}
+                for f in findings_list:
+                    ftype = f.get("finding_type", "")
+                    by_type.setdefault(ftype, []).append(f)
+
                 people = run_data.get("people") or []
                 pages = run_data.get("pages") or []
 
@@ -602,41 +614,88 @@ async def export_batch_results(
                 if web_status == "unavailable" and not web_url:
                     web_url = f"unavailable: {website.get('reason', 'Website unreachable or DNS failed')}"
 
-                # Findings extraction
-                overview_item = findings.get("overview") or {}
-                overview_val = overview_item.get("value_text") or overview_item.get("finding_value", "")
-                overview_stat = overview_item.get("verification_status") or overview_item.get("status", "unavailable")
-                if overview_stat == "unavailable" or not overview_val:
-                    overview_val = f"unavailable: {overview_item.get('reason', 'Overview not found on scanned pages')}"
-
-                vision_item = findings.get("vision") or {}
-                vision_val = vision_item.get("value_text") or vision_item.get("finding_value", "")
-                if vision_item.get("verification_status") == "unavailable" or vision_item.get("status") == "unavailable" or not vision_val:
-                    vision_val = f"unavailable: {vision_item.get('reason', 'Vision statement not found on scanned pages')}"
-
-                mission_item = findings.get("mission") or {}
-                mission_val = mission_item.get("value_text") or mission_item.get("finding_value", "")
-                if mission_item.get("verification_status") == "unavailable" or mission_item.get("status") == "unavailable" or not mission_val:
-                    mission_val = f"unavailable: {mission_item.get('reason', 'Mission statement not found on scanned pages')}"
-
-                services_item = findings.get("services") or {}
-                services_raw = services_item.get("value_text") or services_item.get("finding_value", "")
-                if isinstance(services_raw, str) and services_raw.startswith("["):
-                    try:
-                        services_list = json.loads(services_raw)
-                    except Exception:
-                        services_list = [s.strip() for s in services_raw.split(";") if s.strip()]
-                elif isinstance(services_raw, list):
-                    services_list = services_raw
-                elif isinstance(services_raw, str) and services_raw:
-                    services_list = [s.strip() for s in services_raw.split(";") if s.strip()]
+                # 1. Overview extraction
+                ov_items = by_type.get("overview") or []
+                if ov_items:
+                    ov_item = ov_items[0]
+                    ov_val = (ov_item.get("value_text") or ov_item.get("finding_value") or "").strip()
+                    ov_stat = ov_item.get("verification_status") or ov_item.get("status") or "unavailable"
+                    if ov_stat == "unavailable" or not ov_val or ov_val == "unavailable":
+                        reason = ov_item.get("reason") or "Overview not found on scanned pages"
+                        overview_val = f"unavailable: {reason}"
+                        overview_stat = "unavailable"
+                    else:
+                        overview_val = ov_val
+                        overview_stat = ov_stat
                 else:
-                    services_list = []
+                    overview_val = "unavailable: Overview not found on scanned pages"
+                    overview_stat = "unavailable"
 
-                if services_list:
-                    services_val = "; ".join(str(s) for s in services_list[:5])
+                # 2. Vision extraction
+                vis_items = by_type.get("vision") or []
+                if vis_items:
+                    v_item = vis_items[0]
+                    v_val = (v_item.get("value_text") or v_item.get("finding_value") or "").strip()
+                    v_stat = v_item.get("verification_status") or v_item.get("status") or "unavailable"
+                    if v_stat == "unavailable" or not v_val or v_val == "unavailable":
+                        reason = v_item.get("reason") or "Vision statement not found on scanned pages"
+                        vision_val = f"unavailable: {reason}"
+                    else:
+                        vision_val = f"{v_val} [{v_stat}]" if not v_val.endswith(f"[{v_stat}]") else v_val
                 else:
-                    services_val = f"unavailable: {services_item.get('reason', 'Services list not found on scanned pages')}"
+                    vision_val = "unavailable: Vision statement not found on scanned pages"
+
+                # 3. Mission extraction
+                mis_items = by_type.get("mission") or []
+                if mis_items:
+                    m_item = mis_items[0]
+                    m_val = (m_item.get("value_text") or m_item.get("finding_value") or "").strip()
+                    m_stat = m_item.get("verification_status") or m_item.get("status") or "unavailable"
+                    if m_stat == "unavailable" or not m_val or m_val == "unavailable":
+                        reason = m_item.get("reason") or "Mission statement not found on scanned pages"
+                        mission_val = f"unavailable: {reason}"
+                    else:
+                        mission_val = f"{m_val} [{m_stat}]" if not m_val.endswith(f"[{m_stat}]") else m_val
+                else:
+                    mission_val = "unavailable: Mission statement not found on scanned pages"
+
+                # 4. Services (product_service) extraction
+                svc_items = [
+                    f for f in (by_type.get("product_service", []) + by_type.get("services", []))
+                    if f.get("verification_status") != "unavailable" and f.get("status") != "unavailable"
+                ]
+                extracted_services: list[str] = []
+                for s in svc_items:
+                    raw_val = s.get("value_text") or s.get("finding_value") or ""
+                    s_stat = s.get("verification_status") or s.get("status") or "verified"
+                    if not raw_val or raw_val == "unavailable":
+                        continue
+                    if isinstance(raw_val, str) and raw_val.startswith("["):
+                        try:
+                            parsed = json.loads(raw_val)
+                            if isinstance(parsed, list):
+                                for p in parsed:
+                                    p_str = str(p).strip()
+                                    if p_str:
+                                        formatted_p = f"{p_str} [{s_stat}]" if not p_str.endswith(f"[{s_stat}]") else p_str
+                                        extracted_services.append(formatted_p)
+                                continue
+                        except Exception:
+                            pass
+                    raw_str = str(raw_val).strip()
+                    if raw_str:
+                        formatted_s = f"{raw_str} [{s_stat}]" if not raw_str.endswith(f"[{s_stat}]") else raw_str
+                        extracted_services.append(formatted_s)
+
+                if extracted_services:
+                    services_val = "; ".join(extracted_services[:5])
+                else:
+                    unavail_svc = [
+                        f for f in (by_type.get("product_service", []) + by_type.get("services", []))
+                        if f.get("verification_status") == "unavailable" or f.get("status") == "unavailable" or f.get("reason")
+                    ]
+                    reason = unavail_svc[0].get("reason") if unavail_svc else "Services list not found on scanned pages"
+                    services_val = f"unavailable: {reason or 'Services list not found on scanned pages'}"
 
                 # Decision makers: format as "Name - Title [status]"
                 # Excluded rows never appear!
@@ -702,7 +761,7 @@ async def export_batch_results(
     ]
 
     with open(decision_makers_csv_path, "w", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(f, fieldnames=dm_fieldnames)
+        writer = csv.DictWriter(f, fieldnames=dm_fieldnames, quoting=csv.QUOTE_MINIMAL)
         writer.writeheader()
 
         for d in domains:
