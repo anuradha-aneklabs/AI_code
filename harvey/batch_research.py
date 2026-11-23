@@ -23,6 +23,7 @@ from typing import Any
 
 from harvey.company_narrative import extract_company_narrative, is_valid_service_name
 from harvey.decision_makers import find_decision_makers
+from harvey.entity_cross_check import check_entity_match
 from harvey.single_domain_research import (
     load_free_email_providers,
     run_single_email_research,
@@ -77,8 +78,21 @@ def load_import_columns_config(config_path: str | Path | None = None) -> dict[st
     return {
         "email": ["email", "e-mail", "email address", "e-mail address", "contact email", "work email", "email_address", "mail"],
         "name": ["name", "full name", "full_name", "contact name", "contact_name", "person", "lead name", "first and last name"],
+        "first_name": ["first name", "firstname", "first_name", "first"],
+        "middle_name": ["middle name", "middlename", "middle_initial", "middleinitial", "middle", "mi"],
+        "last_name": ["last name", "lastname", "last_name", "last", "surname"],
+        "suffix": ["suffix", "name suffix"],
+        "company_name": ["entityname", "company", "organization", "organisation", "licensee", "business name", "company name", "entity_name", "business_name"],
         "phone": ["phone", "mobile", "contact number", "phone number", "phone_number", "telephone", "cell"],
     }
+
+
+_EMAIL_NEGATIVE_RE = re.compile(r"(valid|status|verified|score|flag)", re.IGNORECASE)
+
+
+def _norm_header(s: str) -> str:
+    """Normalize header string: lowercase and remove spaces, hyphens, and underscores."""
+    return re.sub(r"[\s_\-]+", "", s.lower().strip())
 
 
 def parse_import_file(
@@ -129,15 +143,56 @@ def parse_import_file(
     else:
         raise ValueError(f"Unsupported file format '{ext}'. Supported formats: .csv, .xlsx")
 
-    # Map headers to canonical field names (email, name, phone)
+    # Map headers to canonical field names (email, company_name, first_name, middle_name, last_name, suffix, name, phone)
     col_mapping: dict[str, int] = {}
-    normalized_headers = [h.lower().strip() for h in headers]
+    normalized_headers = [_norm_header(h) for h in headers]
 
-    for canonical, aliases in col_cfg.items():
+    role_priority = [
+        "email",
+        "company_name",
+        "first_name",
+        "middle_name",
+        "last_name",
+        "suffix",
+        "name",
+        "phone",
+    ]
+
+    # Pass 1: exact normalized alias matches
+    for canonical in role_priority:
+        if canonical not in col_cfg:
+            continue
+        aliases = col_cfg[canonical]
         for alias in aliases:
-            alias_lower = alias.lower().strip()
-            if alias_lower in normalized_headers:
-                col_mapping[canonical] = normalized_headers.index(alias_lower)
+            norm_alias = _norm_header(alias)
+            for idx, nh in enumerate(normalized_headers):
+                if nh == norm_alias and idx not in col_mapping.values():
+                    if canonical == "email" and _EMAIL_NEGATIVE_RE.search(headers[idx]):
+                        continue
+                    col_mapping[canonical] = idx
+                    break
+            if canonical in col_mapping:
+                break
+
+    # Pass 2: token matching for unmapped roles
+    for canonical in role_priority:
+        if canonical in col_mapping or canonical not in col_cfg:
+            continue
+        aliases = col_cfg[canonical]
+        for alias in aliases:
+            alias_tokens = set(re.findall(r"[a-z0-9]+", alias.lower()))
+            if not alias_tokens:
+                continue
+            for idx, h in enumerate(headers):
+                if idx in col_mapping.values():
+                    continue
+                header_tokens = set(re.findall(r"[a-z0-9]+", h.lower()))
+                if alias_tokens.issubset(header_tokens):
+                    if canonical == "email" and _EMAIL_NEGATIVE_RE.search(h):
+                        continue
+                    col_mapping[canonical] = idx
+                    break
+            if canonical in col_mapping:
                 break
 
     if "email" not in col_mapping:
@@ -162,11 +217,27 @@ def parse_import_file(
                 return str(val or "").strip()
             return ""
 
+        # Compose name: if single 'name' column exists and has value, use it.
+        # Otherwise combine first_name, middle_name, last_name, suffix.
+        raw_name = ""
+        if "name" in col_mapping and _get_val("name"):
+            raw_name = _get_val("name")
+        else:
+            name_parts = [
+                _get_val(comp)
+                for comp in ("first_name", "middle_name", "last_name", "suffix")
+                if _get_val(comp)
+            ]
+            raw_name = " ".join(name_parts).strip()
+
+        company_hint = _get_val("company_name")
+
         parsed_rows.append({
             "row_number": physical_row_number,
             "raw_email": _get_val("email"),
-            "raw_name": _get_val("name"),
+            "raw_name": raw_name,
             "raw_phone": _get_val("phone"),
+            "company_name_hint": company_hint,
         })
 
     canonical_headers = {k: headers[idx] for k, idx in col_mapping.items()}
@@ -197,6 +268,7 @@ async def create_batch_from_file(
         raw_email = r["raw_email"]
         raw_name = r["raw_name"]
         raw_phone = r["raw_phone"]
+        company_hint = r.get("company_name_hint", "")
         row_num = r["row_number"]
 
         if not raw_email:
@@ -207,6 +279,7 @@ async def create_batch_from_file(
                 "raw_name": raw_name,
                 "raw_email": "",
                 "raw_phone": raw_phone,
+                "company_name_hint": company_hint,
                 "normalized_email": "",
                 "domain": "",
                 "row_status": "missing_email",
@@ -223,6 +296,7 @@ async def create_batch_from_file(
                 "raw_name": raw_name,
                 "raw_email": raw_email,
                 "raw_phone": raw_phone,
+                "company_name_hint": company_hint,
                 "normalized_email": val_res.normalized_email,
                 "domain": "",
                 "row_status": "invalid_email",
@@ -238,6 +312,7 @@ async def create_batch_from_file(
                 "raw_name": raw_name,
                 "raw_email": raw_email,
                 "raw_phone": raw_phone,
+                "company_name_hint": company_hint,
                 "normalized_email": val_res.normalized_email,
                 "domain": val_res.domain,
                 "row_status": "free_mail",
@@ -255,6 +330,7 @@ async def create_batch_from_file(
                 "raw_name": raw_name,
                 "raw_email": raw_email,
                 "raw_phone": raw_phone,
+                "company_name_hint": company_hint,
                 "normalized_email": val_res.normalized_email,
                 "domain": domain,
                 "row_status": "duplicate_domain",
@@ -273,6 +349,7 @@ async def create_batch_from_file(
                     "raw_name": raw_name,
                     "raw_email": raw_email,
                     "raw_phone": raw_phone,
+                    "company_name_hint": company_hint,
                     "normalized_email": val_res.normalized_email,
                     "domain": domain,
                     "row_status": "skipped_limit",
@@ -286,6 +363,7 @@ async def create_batch_from_file(
                     "raw_name": raw_name,
                     "raw_email": raw_email,
                     "raw_phone": raw_phone,
+                    "company_name_hint": company_hint,
                     "normalized_email": val_res.normalized_email,
                     "domain": domain,
                     "row_status": "valid",
@@ -330,6 +408,7 @@ async def create_batch_from_file(
         preview_rows.append({
             "row_number": r["row_number"],
             "name": r["raw_name"],
+            "company_name_hint": r.get("company_name_hint", ""),
             "email_masked": mask_email(r["raw_email"]),
             "phone_masked": mask_phone(r["raw_phone"]),
             "domain": r["domain"],
@@ -437,6 +516,27 @@ async def run_batch(
             active_people = [p for p in people if p.get("verification_status") != "unavailable" and not p.get("excluded_reason")]
             unavailable_people = [p for p in people if p.get("verification_status") == "unavailable"]
 
+            # Entity cross-check against hint(s) from import_rows
+            all_rows = await state.get_import_rows(batch_id)
+            domain_hints = list(dict.fromkeys(
+                r.get("company_name_hint", "").strip()
+                for r in all_rows
+                if r.get("domain") == domain and r.get("company_name_hint", "").strip()
+            ))
+
+            entity_check = "no_hint"
+            entity_check_evidence = ""
+            if domain_hints:
+                for hint in domain_hints:
+                    ec_stat, ec_ev = check_entity_match(hint, pages=pages, website=website)
+                    if ec_stat == "match":
+                        entity_check = "match"
+                        entity_check_evidence = ec_ev
+                        break
+                if entity_check != "match":
+                    entity_check = "no_match"
+                    entity_check_evidence = ""
+
             stage_summary = {
                 "website_status": web_status,
                 "website_url": web_url,
@@ -444,6 +544,8 @@ async def run_batch(
                 "overview_status": overview_status,
                 "decision_makers_found": len(active_people),
                 "has_unavailable_row": len(unavailable_people) > 0,
+                "entity_check": entity_check,
+                "entity_check_evidence": entity_check_evidence,
             }
 
             dom_end = _utcnow()
@@ -455,6 +557,8 @@ async def run_batch(
                 domain,
                 status=dom_status,
                 run_id=run_id,
+                entity_check=entity_check,
+                entity_check_evidence=entity_check_evidence,
                 stage_summary_json=json.dumps(stage_summary),
                 error="",
                 finished_at=dom_end,
@@ -468,6 +572,8 @@ async def run_batch(
                 "website_url": web_url,
                 "pages_scanned": len(pages),
                 "decision_makers_count": len(active_people),
+                "entity_check": entity_check,
+                "entity_check_evidence": entity_check_evidence,
             })
 
         except Exception as e:
@@ -554,27 +660,52 @@ async def export_batch_results(
                 runs_by_domain[d["domain"]] = run_data
 
     # 1. Export contacts_results.csv
-    # Columns: row_number, name, email, phone, row_status, domain, website status and URL,
-    # overview + its status, up to 5 services, vision, mission, decision makers as "Name - Title [status]", source URLs, run_id, error
-    contact_fieldnames = [
-        "row_number",
-        "name",
-        "email",
-        "phone",
-        "row_status",
-        "domain",
-        "website_status",
-        "website_url",
-        "overview",
-        "overview_status",
-        "services",
-        "vision",
-        "mission",
-        "decision_makers",
-        "source_urls",
-        "run_id",
-        "error",
-    ]
+    # Columns: row_number, name, (company_name_hint if present), email, phone, row_status, domain, (entity_check if present),
+    # website status and URL, overview + its status, up to 5 services, vision, mission, decision makers, source URLs, run_id, error
+    has_company_hints = any(r.get("company_name_hint") for r in rows)
+
+    if has_company_hints:
+        contact_fieldnames = [
+            "row_number",
+            "name",
+            "company_name_hint",
+            "email",
+            "phone",
+            "row_status",
+            "domain",
+            "entity_check",
+            "website_status",
+            "website_url",
+            "overview",
+            "overview_status",
+            "services",
+            "vision",
+            "mission",
+            "decision_makers",
+            "source_urls",
+            "run_id",
+            "error",
+        ]
+    else:
+        contact_fieldnames = [
+            "row_number",
+            "name",
+            "email",
+            "phone",
+            "row_status",
+            "domain",
+            "website_status",
+            "website_url",
+            "overview",
+            "overview_status",
+            "services",
+            "vision",
+            "mission",
+            "decision_makers",
+            "source_urls",
+            "run_id",
+            "error",
+        ]
 
     with open(contacts_csv_path, "w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=contact_fieldnames, quoting=csv.QUOTE_MINIMAL)
@@ -584,8 +715,26 @@ async def export_batch_results(
             dom = r.get("domain", "")
             r_stat = r.get("row_status", "")
             run_data = runs_by_domain.get(dom)
+            company_hint = r.get("company_name_hint", "")
+            d_rec = domain_map.get(dom, {})
+            dom_entity_check = d_rec.get("entity_check", "no_hint")
+            dom_entity_ev = d_rec.get("entity_check_evidence", "")
 
-            if run_data:
+            if r_stat == "free_mail":
+                free_msg = "free-mail address; website not researched; web search is a later milestone"
+                run_id = ""
+                web_status = "unavailable"
+                web_url = f"unavailable: {free_msg}"
+                overview_stat = "unavailable"
+                overview_val = f"unavailable: {free_msg}"
+                services_val = f"unavailable: {free_msg}"
+                vision_val = f"unavailable: {free_msg}"
+                mission_val = f"unavailable: {free_msg}"
+                dm_val = f"unavailable: {free_msg}"
+                source_urls_val = ""
+                row_err = r.get("error", "")
+                entity_check_val = f"unavailable: {free_msg}"
+            elif run_data:
                 run_id = run_data["id"]
                 website = run_data.get("website") or {}
                 findings_raw = run_data.get("findings") or []
@@ -614,6 +763,14 @@ async def export_batch_results(
                 web_url = website.get("final_url", "")
                 if web_status == "unavailable" and not web_url:
                     web_url = f"unavailable: {website.get('reason', 'Website unreachable or DNS failed')}"
+
+                # Entity check display
+                if dom_entity_check == "match":
+                    entity_check_val = f"match: {dom_entity_ev}" if dom_entity_ev else "match"
+                elif dom_entity_check == "no_match":
+                    entity_check_val = "no_match: domain may belong to a filer, consultant or parent organisation"
+                else:
+                    entity_check_val = "no_hint"
 
                 # 1. Overview extraction
                 ov_items = by_type.get("overview") or []
@@ -720,7 +877,11 @@ async def export_batch_results(
                     if not p.get("excluded_reason") and p.get("verification_status") != "unavailable"
                 ]
                 if active_people:
-                    dm_val = "; ".join(f"{p['full_name']} - {p['title']} [{p['verification_status']}]" for p in active_people)
+                    dm_parts = "; ".join(f"{p['full_name']} - {p['title']} [{p['verification_status']}]" for p in active_people)
+                    if dom_entity_check == "no_match":
+                        dm_val = f"[WARNING: domain may belong to a filer, consultant or parent organisation] {dm_parts}"
+                    else:
+                        dm_val = dm_parts
                 else:
                     unavail_p = [p for p in people if p.get("verification_status") == "unavailable"]
                     if unavail_p:
@@ -743,8 +904,9 @@ async def export_batch_results(
                 dm_val = f"unavailable: {r_stat}"
                 source_urls_val = ""
                 row_err = r.get("error", "")
+                entity_check_val = "unavailable"
 
-            writer.writerow({
+            out_row = {
                 "row_number": r["row_number"],
                 "name": r["raw_name"],
                 "email": r["raw_email"],
@@ -762,7 +924,12 @@ async def export_batch_results(
                 "source_urls": source_urls_val,
                 "run_id": run_id,
                 "error": row_err,
-            })
+            }
+            if has_company_hints:
+                out_row["company_name_hint"] = company_hint
+                out_row["entity_check"] = entity_check_val
+
+            writer.writerow(out_row)
 
     # 2. Export decision_makers.csv
     # Columns: domain, name, title, role_category, status, source_url, evidence up to 300 chars
@@ -782,6 +949,7 @@ async def export_batch_results(
 
         for d in domains:
             dom = d["domain"]
+            dom_entity_check = d.get("entity_check", "no_hint")
             run_data = runs_by_domain.get(dom)
             if not run_data:
                 writer.writerow({
@@ -812,6 +980,8 @@ async def export_batch_results(
             else:
                 for p in clean_people:
                     ev = p.get("evidence_text", "")
+                    if dom_entity_check == "no_match":
+                        ev = f"[domain may belong to a filer, consultant or parent organisation] {ev}"
                     if len(ev) > 300:
                         ev = ev[:297] + "..."
                     writer.writerow({

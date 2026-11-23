@@ -59,7 +59,8 @@ async def cmd_create(args: argparse.Namespace) -> None:
     print("-------------------------------------------------------")
     print("Sample Validated Rows (PII Masked):")
     for r in res["preview"]:
-        print(f"  Row {r['row_number']}: {r['name']} | {r['email_masked']} | {r['phone_masked']} | {r['domain']} | {r['row_status']} {r['error']}")
+        hint_str = f" | Entity: {r['company_name_hint']}" if r.get("company_name_hint") else ""
+        print(f"  Row {r['row_number']}: {r['name'] or '[NO NAME]'}{hint_str} | {r['email_masked']} | {r['phone_masked']} | {r['domain']} | {r['row_status']} {r['error']}")
     print("=======================================================\n")
     print(f"To run batch: python scripts/import_batch.py run {res['batch_id']} --max-domains {args.max_domains}")
 
@@ -92,7 +93,8 @@ async def cmd_run(args: argparse.Namespace) -> None:
         status = d.get("status")
         run_id = d.get("run_id", "")
         if status == "completed":
-            print(f"  [COMPLETED] {dom} (run_id: {run_id}) | Web: {d.get('website_status')} | Pages: {d.get('pages_scanned')} | DMs: {d.get('decision_makers_count')}")
+            ec_str = f" | Entity: {d.get('entity_check', 'no_hint')}"
+            print(f"  [COMPLETED] {dom} (run_id: {run_id}) | Web: {d.get('website_status')} | Pages: {d.get('pages_scanned')} | DMs: {d.get('decision_makers_count')}{ec_str}")
         else:
             print(f"  [FAILED]    {dom} | Error: {d.get('error')}")
     print("=======================================================\n")

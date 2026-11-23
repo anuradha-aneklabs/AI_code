@@ -959,6 +959,12 @@ MIGRATIONS: list[str] = [
     CREATE INDEX IF NOT EXISTS idx_import_domains_batch_id ON import_domains(batch_id);
     CREATE INDEX IF NOT EXISTS idx_import_domains_status ON import_domains(batch_id, status);
     """,
+    # ── v31: batch research company_name_hint on import_rows, and entity_check on import_domains ──
+    """
+    ALTER TABLE import_rows ADD COLUMN company_name_hint TEXT DEFAULT '';
+    ALTER TABLE import_domains ADD COLUMN entity_check TEXT DEFAULT '';
+    ALTER TABLE import_domains ADD COLUMN entity_check_evidence TEXT DEFAULT '';
+    """,
 ]
 
 CRM_PIPELINE_STAGES: list[str] = [
@@ -5707,6 +5713,7 @@ class StateManager:
         raw_name: str = "",
         raw_email: str = "",
         raw_phone: str = "",
+        company_name_hint: str = "",
         normalized_email: str = "",
         domain: str = "",
         row_status: str,
@@ -5720,12 +5727,12 @@ class StateManager:
                 """
                 INSERT INTO import_rows (
                     id, batch_id, row_number, raw_name, raw_email, raw_phone,
-                    normalized_email, domain, row_status, error, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    company_name_hint, normalized_email, domain, row_status, error, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     row_id, batch_id, row_number, raw_name, raw_email, raw_phone,
-                    normalized_email, domain, row_status, error, created,
+                    company_name_hint, normalized_email, domain, row_status, error, created,
                 ),
             )
             await db.commit()
@@ -5740,13 +5747,14 @@ class StateManager:
                 """
                 INSERT INTO import_rows (
                     id, batch_id, row_number, raw_name, raw_email, raw_phone,
-                    normalized_email, domain, row_status, error, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    company_name_hint, normalized_email, domain, row_status, error, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 [
                     (
                         r["id"], r["batch_id"], r["row_number"],
                         r.get("raw_name", ""), r.get("raw_email", ""), r.get("raw_phone", ""),
+                        r.get("company_name_hint", ""),
                         r.get("normalized_email", ""), r.get("domain", ""),
                         r["row_status"], r.get("error", ""), r.get("created_at") or _utcnow().isoformat(),
                     )
@@ -5775,6 +5783,8 @@ class StateManager:
         representative_email: str,
         run_id: str = "",
         status: str = "pending",
+        entity_check: str = "",
+        entity_check_evidence: str = "",
         stage_summary_json: str = "{}",
         error: str = "",
         started_at: str | None = None,
@@ -5788,12 +5798,14 @@ class StateManager:
                 """
                 INSERT INTO import_domains (
                     id, batch_id, domain, representative_email, run_id,
-                    status, stage_summary_json, error, started_at, finished_at, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    status, entity_check, entity_check_evidence,
+                    stage_summary_json, error, started_at, finished_at, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     domain_id, batch_id, domain, representative_email, run_id,
-                    status, stage_summary_json, error, started_at, finished_at, created,
+                    status, entity_check, entity_check_evidence,
+                    stage_summary_json, error, started_at, finished_at, created,
                 ),
             )
             await db.commit()
@@ -5806,6 +5818,8 @@ class StateManager:
         *,
         status: str,
         run_id: str | None = None,
+        entity_check: str | None = None,
+        entity_check_evidence: str | None = None,
         stage_summary_json: str | None = None,
         error: str | None = None,
         started_at: str | None = None,
@@ -5818,6 +5832,12 @@ class StateManager:
             if run_id is not None:
                 updates.append("run_id = ?")
                 params.append(run_id)
+            if entity_check is not None:
+                updates.append("entity_check = ?")
+                params.append(entity_check)
+            if entity_check_evidence is not None:
+                updates.append("entity_check_evidence = ?")
+                params.append(entity_check_evidence)
             if stage_summary_json is not None:
                 updates.append("stage_summary_json = ?")
                 params.append(stage_summary_json)
@@ -5833,6 +5853,7 @@ class StateManager:
             params.extend([batch_id, domain])
             sql = f"UPDATE import_domains SET {', '.join(updates)} WHERE batch_id = ? AND domain = ?"
             await db.execute(sql, tuple(params))
+            await db.commit()
             await db.commit()
 
     async def get_import_domains(self, batch_id: str) -> list[dict[str, Any]]:

@@ -1,0 +1,33 @@
+{
+  "stopwords": [
+    "the",
+    "of",
+    "and",
+    "&",
+    "a",
+    "an",
+    "for",
+    "in",
+    "on",
+    "at",
+    "to",
+    "by"
+  ],
+  "legal_suffixes": [
+    "inc",
+    "incorporated",
+    "llc",
+    "l.l.c.",
+    "corp",
+    "corporation",
+    "co",
+    "company",
+    "ltd",
+    "limited",
+    "lp",
+    "llp",
+    "pllc",
+    "pc",
+    "p.c."
+  ]
+}

@@ -19,6 +19,42 @@
     "lead name",
     "first and last name"
   ],
+  "first_name": [
+    "first name",
+    "firstname",
+    "first_name",
+    "first"
+  ],
+  "middle_name": [
+    "middle name",
+    "middlename",
+    "middle_initial",
+    "middleinitial",
+    "middle",
+    "mi"
+  ],
+  "last_name": [
+    "last name",
+    "lastname",
+    "last_name",
+    "last",
+    "surname"
+  ],
+  "suffix": [
+    "suffix",
+    "name suffix"
+  ],
+  "company_name": [
+    "entityname",
+    "company",
+    "organization",
+    "organisation",
+    "licensee",
+    "business name",
+    "company name",
+    "entity_name",
+    "business_name"
+  ],
   "phone": [
     "phone",
     "mobile",
