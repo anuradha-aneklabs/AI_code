@@ -278,6 +278,8 @@ def title_names_other_org(title: str, domain: str, site_name: str = "") -> bool:
         if re.fullmatch(r"(?i)(?:and\s+)?(?:owner|founder|co-?founder|ceo|cto|coo|cmo|president|"
                         r"principal|partner|director|chief[\w\s]*|operations|executive officer)", org):
             continue
+        if re.search(r"(?i)\b(?:officer|director|leader|manager|head|lead|vp|sv?p|ev?p)\b", org):
+            continue
         if not names_business(org, domain, site_name):
             return True
     return False

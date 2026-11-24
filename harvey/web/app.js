@@ -7517,6 +7517,45 @@ function toggleResearchUploadPanel() {
   if (chevron) chevron.innerHTML = isHidden ? '&#9652;' : '&#9662;';
 }
 
+let _researchUnmask = false;
+
+function maskContactName(name) {
+  if (!name || !name.trim()) return '—';
+  if (_researchUnmask) return name;
+  const parts = name.trim().split(/\s+/).filter(Boolean);
+  if (!parts.length) return '—';
+  return parts.map(p => p[0].toUpperCase() + '.').join(' ');
+}
+
+function toggleResearchMasking() {
+  _researchUnmask = !_researchUnmask;
+  const btn = document.getElementById('btn-research-unmask-toggle');
+  if (btn) {
+    btn.innerHTML = _researchUnmask ? '🔒 Mask Contact Names' : '👁 Unmask Contact Names';
+  }
+  renderResearchTable();
+  const previewCont = document.getElementById('research-upload-preview-container');
+  if (previewCont && previewCont.style.display !== 'none') {
+    const tbody = document.getElementById('research-preview-tbody');
+    if (tbody && _selectedBatchPreviewRows) {
+      tbody.innerHTML = _selectedBatchPreviewRows.map(r => {
+        const stClass = r.row_status === 'valid' ? 't-good' : r.row_status === 'free_mail' ? 't-note' : 't-bad';
+        return `<tr>
+          <td>${escHtml(r.row_number)}</td>
+          <td><strong>${escHtml(maskContactName(r.name))}</strong></td>
+          <td>${escHtml(r.company_name_hint || '—')}</td>
+          <td><code>${_researchUnmask ? escHtml(r.raw_email || r.email || r.email_masked) : escHtml(r.email_masked || '—')}</code></td>
+          <td><code>${_researchUnmask ? escHtml(r.raw_phone || r.phone || r.phone_masked) : escHtml(r.phone_masked || '—')}</code></td>
+          <td>${escHtml(r.domain || '—')}</td>
+          <td><span class="badge ${stClass}">${escHtml(r.row_status)}</span></td>
+        </tr>`;
+      }).join('');
+    }
+  }
+}
+
+let _selectedBatchPreviewRows = null;
+
 function onResearchFileSelected(input) {
   const uploadBtn = document.getElementById('btn-research-upload');
   if (input && input.files && input.files[0]) {
@@ -7596,11 +7635,12 @@ async function uploadResearchFile() {
       // Preview table rows
       const tbody = document.getElementById('research-preview-tbody');
       if (tbody && data.batch.preview) {
+        _selectedBatchPreviewRows = data.batch.preview;
         tbody.innerHTML = data.batch.preview.map(r => {
           const stClass = r.row_status === 'valid' ? 't-good' : r.row_status === 'free_mail' ? 't-note' : 't-bad';
           return `<tr>
             <td>${escHtml(r.row_number)}</td>
-            <td><strong>${escHtml(r.name || '—')}</strong></td>
+            <td><strong>${escHtml(maskContactName(r.name))}</strong></td>
             <td>${escHtml(r.company_name_hint || '—')}</td>
             <td><code>${escHtml(r.email_masked || '—')}</code></td>
             <td><code>${escHtml(r.phone_masked || '—')}</code></td>
@@ -7737,7 +7777,13 @@ function renderResearchTable() {
       webHtml = `<div><a href="${escHtml(finalUrl)}" target="_blank" rel="noopener noreferrer" style="color:var(--accent);text-decoration:none;font-weight:500;">${escHtml(d.domain)}</a></div>` +
         `<span class="badge t-good" style="font-size:10px;margin-top:2px;">Verified Website</span>`;
     } else if (webStat === 'unavailable') {
-      webHtml = `<div>${escHtml(d.domain)}</div><span class="badge t-bad" style="font-size:10px;margin-top:2px;">Unreachable</span>`;
+      const stgSum = d.stage_summary || {};
+      if (stgSum.website_candidate) {
+        const candUrl = stgSum.website_candidate.candidate_url || '';
+        webHtml = `<div>${escHtml(d.domain)}</div><span class="badge t-waiting" style="font-size:10px;margin-top:2px;" title="possible website (unverified): ${escHtml(candUrl)} (source: search)">Possible Site (Unverified)</span>`;
+      } else {
+        webHtml = `<div>${escHtml(d.domain)}</div><span class="badge t-bad" style="font-size:10px;margin-top:2px;">Unreachable</span>`;
+      }
     } else {
       webHtml = `<div>${escHtml(d.domain)}</div><span class="badge t-waiting" style="font-size:10px;margin-top:2px;">Pending</span>`;
     }
@@ -7746,8 +7792,12 @@ function renderResearchTable() {
     let entityBadge = '';
     if (d.entity_check === 'match') {
       entityBadge = `<span class="badge t-good" title="${escHtml(d.entity_check_evidence || 'Entity confirmed')}">Verified Match</span>`;
+    } else if (d.entity_check === 'partial_match') {
+      entityBadge = `<span class="badge t-note" title="${escHtml(d.entity_check_evidence || 'Domain appears to belong to related/parent brand')}">Partial Match</span>`;
     } else if (d.entity_check === 'no_match') {
       entityBadge = `<span class="badge t-bad" title="${escHtml(d.entity_check_evidence || 'Company name not confirmed on website')}">No Match</span>`;
+    } else if (d.entity_check === 'pending') {
+      entityBadge = `<span class="badge t-waiting" title="Pending entity cross-check">Pending Check</span>`;
     } else {
       entityBadge = `<span class="badge t-idle">No Hint</span>`;
     }
@@ -7771,7 +7821,9 @@ function renderResearchTable() {
     // Decision Makers
     const people = d.people || [];
     let dmHtml = '';
-    if (people.length > 0) {
+    if (d.entity_check === 'no_match' && people.length > 0) {
+      dmHtml = `<span class="muted" style="font-size:11px;color:#f87171;" title="Cannot attribute decision makers to input entity when entity check is no_match">⚠️ ${people.length} person(s) found on site, but entity is unverified (no_match)</span>`;
+    } else if (people.length > 0) {
       dmHtml = people.slice(0, 2).map(p => {
         return `<div class="research-person-card">` +
           `<strong>${escHtml(p.full_name || 'Officer')}</strong> &bull; <span class="muted">${escHtml(p.title || 'Executive')}</span>` +
@@ -7822,22 +7874,46 @@ function openResearchDetailModal(domainName) {
 
   if (titleEl) titleEl.textContent = companyHint;
   if (domainSub) {
-    const webUrl = dom.website?.final_url || `https://${dom.domain}`;
-    domainSub.innerHTML = `<a href="${escHtml(webUrl)}" target="_blank" rel="noopener noreferrer" style="color:var(--accent);text-decoration:none;">${escHtml(webUrl)}</a> &bull; Status: <span class="badge ${dom.status === 'completed' ? 't-good' : 't-waiting'}">${escHtml(dom.status)}</span>`;
+    const stgSummary = dom.stage_summary || {};
+    if (stgSummary.website_candidate) {
+      const candUrl = stgSummary.website_candidate.candidate_url || '';
+      domainSub.innerHTML = `<span style="color:var(--text-2);">possible website (unverified): <a href="${escHtml(candUrl)}" target="_blank" rel="noopener noreferrer" style="color:var(--accent);text-decoration:none;">${escHtml(candUrl)}</a> (source: search)</span> &bull; Status: <span class="badge t-waiting">unverified</span>`;
+    } else {
+      const webUrl = dom.website?.final_url || `https://${dom.domain}`;
+      domainSub.innerHTML = `<a href="${escHtml(webUrl)}" target="_blank" rel="noopener noreferrer" style="color:var(--accent);text-decoration:none;">${escHtml(webUrl)}</a> &bull; Status: <span class="badge ${dom.status === 'completed' ? 't-good' : 't-waiting'}">${escHtml(dom.status)}</span>`;
+    }
   }
 
   // Build modal body
   let bodyHtml = '';
 
   // Entity Check section
-  let ecBadge = dom.entity_check === 'match' ? '<span class="badge t-good">Verified Match</span>' : dom.entity_check === 'no_match' ? '<span class="badge t-bad">No Match</span>' : '<span class="badge t-idle">No Hint</span>';
+  let ecBadge = '';
+  let ecNote = '';
+  if (dom.entity_check === 'match') {
+    ecBadge = '<span class="badge t-good">Verified Match</span>';
+    ecNote = dom.entity_check_evidence ? '<strong>Evidence:</strong> ' + escHtml(dom.entity_check_evidence) : 'Company name confirmed against website content.';
+  } else if (dom.entity_check === 'partial_match') {
+    ecBadge = '<span class="badge t-note">Partial Match</span>';
+    ecNote = dom.entity_check_evidence ? '<strong>Note:</strong> ' + escHtml(dom.entity_check_evidence) : 'Domain appears to belong to a related/parent brand.';
+  } else if (dom.entity_check === 'no_match') {
+    ecBadge = '<span class="badge t-bad">No Match</span>';
+    ecNote = '<strong>Warning:</strong> Domain content does not verify company hint; domain may belong to a filer, consultant or parent organisation.';
+  } else if (dom.entity_check === 'pending') {
+    ecBadge = '<span class="badge t-waiting">Pending Check</span>';
+    ecNote = 'Entity cross-check is pending batch execution.';
+  } else {
+    ecBadge = '<span class="badge t-idle">No Hint</span>';
+    ecNote = 'No company name hint was supplied in input.';
+  }
+
   bodyHtml += `<div class="card" style="margin-bottom:12px;padding:12px;background:var(--surface-2);">
     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;">
       <strong style="font-size:13px;">Entity Cross-Check</strong>
       ${ecBadge}
     </div>
     <div style="font-size:12px;color:var(--text-2);">
-      ${dom.entity_check_evidence ? '<strong>Evidence:</strong> ' + escHtml(dom.entity_check_evidence) : (dom.entity_check === 'match' ? 'Company name confirmed against website content.' : 'Company name hint not confirmed on website.')}
+      ${ecNote}
     </div>
   </div>`;
 
@@ -7876,8 +7952,15 @@ function openResearchDetailModal(domainName) {
     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
       <h4 style="margin:0;font-size:13px;font-weight:600;">Identified Leadership &amp; Decision Makers</h4>
       <span class="badge t-note" style="font-size:10px;">${people.length} Verified</span>
-    </div>
-    ${people.length === 0 ? '<div class="muted" style="font-size:12px;">No executive leadership discovered for this domain.</div>' : `
+    </div>`;
+
+  if (dom.entity_check === 'no_match' && people.length > 0) {
+    bodyHtml += `<div style="margin-bottom:8px;padding:8px 12px;background:rgba(239,68,68,0.1);border:1px solid #ef4444;border-radius:6px;font-size:12px;color:#f87171;">
+      <strong>Consultant / Filer Warning:</strong> Entity check is <code>no_match</code>. The ${people.length} person(s) below are published on <em>${escHtml(dom.domain)}</em>, but <strong>cannot be verified as officers of ${escHtml(companyHint || 'the input entity')}</strong>.
+    </div>`;
+  }
+
+  bodyHtml += `${people.length === 0 ? '<div class="muted" style="font-size:12px;">No executive leadership discovered for this domain.</div>' : `
       <div style="display:flex;flex-direction:column;gap:8px;">
         ${people.map(p => `
           <div style="background:var(--surface-2);border:1px solid var(--line);border-radius:6px;padding:8px 12px;">
@@ -7904,7 +7987,7 @@ function openResearchDetailModal(domainName) {
         <thead>
           <tr>
             <th>Row</th>
-            <th>Name</th>
+            <th>Name (Masked)</th>
             <th>Email (Masked)</th>
             <th>Phone (Masked)</th>
             <th>Status</th>
@@ -7914,9 +7997,9 @@ function openResearchDetailModal(domainName) {
           ${assocRows.map(r => `
             <tr>
               <td>${escHtml(r.row_number)}</td>
-              <td>${escHtml(r.name || '—')}</td>
-              <td><code>${escHtml(r.email_masked || '—')}</code></td>
-              <td><code>${escHtml(r.phone_masked || '—')}</code></td>
+              <td>${escHtml(maskContactName(r.raw_name || r.name))}</td>
+              <td><code>${_researchUnmask ? escHtml(r.raw_email || r.email || r.email_masked) : escHtml(r.email_masked || '—')}</code></td>
+              <td><code>${_researchUnmask ? escHtml(r.raw_phone || r.phone || r.phone_masked) : escHtml(r.phone_masked || '—')}</code></td>
               <td><span class="badge ${r.row_status === 'valid' ? 't-good' : 't-bad'}">${escHtml(r.row_status)}</span></td>
             </tr>
           `).join('')}

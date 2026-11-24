@@ -26,7 +26,10 @@ from harvey.qualification import parse_location_components
 from harvey.models.campaign import Campaign, EmailStep  # noqa: F401 (EmailStep re-exported)
 from harvey.models.conversation import Conversation, Message  # noqa: F401
 
-from harvey.paths import _REAL_PROJECT_ROOT, PROJECT_ROOT, get_db_path
+from harvey.paths import (
+    _REAL_PROJECT_ROOT, PROJECT_ROOT, get_db_path,
+    check_real_db_write_permission, is_real_db_write_allowed, is_under_pytest,
+)
 from harvey.startups import parse_funding
 
 DB_PATH = get_db_path()
@@ -1035,24 +1038,11 @@ class StateManager:
         else:
             real_default = (_REAL_PROJECT_ROOT / "data" / "harvey.db").resolve()
             given = Path(db_path).resolve() if db_path else real_default
-            is_prod_cli = os.environ.get("HARVEY_ALLOW_REAL_DB_WRITE") == "1"
-            is_guarded = bool(
-                os.environ.get("PYTEST_CURRENT_TEST")
-                or os.environ.get("HARVEY_GUARD_REAL_DB") == "1"
-                or not is_prod_cli
-            )
-            if given == real_default and is_guarded and real_default.exists():
-                import tempfile
-                import shutil
-                tmp_dir = Path(tempfile.gettempdir())
-                guarded_copy = tmp_dir / "harvey_guarded_test.db"
-                if not guarded_copy.exists() or guarded_copy.stat().st_size != real_default.stat().st_size:
-                    shutil.copy2(str(real_default), str(guarded_copy))
-                self.db_path = str(guarded_copy)
-            elif given:
-                self.db_path = str(given)
-            else:
-                self.db_path = str(get_db_path())
+            self.db_path = str(given)
+
+    def _assert_write_allowed(self) -> None:
+        """Verify write authorization before modifying SQLite state."""
+        check_real_db_write_permission(self.db_path)
 
     @asynccontextmanager
     async def _connect(self):
@@ -1061,7 +1051,18 @@ class StateManager:
         `timeout` maps to SQLite's busy handler, so writers wait for locks
         (e.g. while the dashboard holds a read) instead of erroring.
         """
-        db = await aiosqlite.connect(self.db_path, timeout=BUSY_TIMEOUT_SECONDS)
+        real_default = (_REAL_PROJECT_ROOT / "data" / "harvey.db").resolve()
+        is_real = False
+        try:
+            is_real = Path(self.db_path).resolve() == real_default
+        except Exception:
+            pass
+
+        if is_real and not is_under_pytest() and not is_real_db_write_allowed():
+            uri = f"file:{self.db_path}?mode=ro"
+            db = await aiosqlite.connect(uri, uri=True, timeout=BUSY_TIMEOUT_SECONDS)
+        else:
+            db = await aiosqlite.connect(self.db_path, timeout=BUSY_TIMEOUT_SECONDS)
         try:
             yield db
         finally:
@@ -1069,6 +1070,7 @@ class StateManager:
 
     async def init_db(self):
         """Create/upgrade the schema. Safe to call on every startup."""
+        self._assert_write_allowed()
         Path(self.db_path).parent.mkdir(parents=True, exist_ok=True)
         async with self._connect() as db:
             # WAL is persistent in the DB file: readers (dashboard) never

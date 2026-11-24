@@ -11,7 +11,8 @@
     "on",
     "at",
     "to",
-    "by"
+    "by",
+    "with"
   ],
   "legal_suffixes": [
     "inc",
@@ -29,5 +30,15 @@
     "pllc",
     "pc",
     "p.c."
-  ]
+  ],
+  "matching_rules": {
+    "match": "all_significant_tokens_found",
+    "partial_match_rules": [
+      "brand_token_equals_domain_sld",
+      "brand_token_in_page_title_or_jsonld_org",
+      "domain_label_equals_prefix_abbreviation"
+    ],
+    "partial_match_note": "domain appears to belong to a related/parent brand",
+    "no_match_note": "domain may belong to a filer, consultant or parent organisation"
+  }
 }

@@ -106,14 +106,20 @@ con.close()
 "
 ```
 
-### Expected Post-Migration State
+### Expected Post-Migration State [VERIFIED via dry-run on data/validation/harvey_deploy_dryrun.db]
 - `user_version` = `32`
-- `companies` count = `1,027`
-- `contacts` count = `1,607`
-- `prospects` count = `1,027`
-- `outbox` = `[('approved', 169), ('cancelled', 6), ('draft', 57), ('sent', 1)]` (Exactly 1 sent)
+- `companies` count = `85`
+- `prospects` count = `178`
+- `outbox` count = `233`
+- `import_batches` count = `7`
+- `import_domains` count = `7`
+- `company_websites` count = `16`
+- `observations` count = `366`
+- `actions` count = `671`
+- `runs` count = `26`
 - `sending_paused` = `True` / `Pilot Evaluation - Read-Only Safety Hold`
 - `channels.email.require_approval` = `True`
+- `channels.email.zero_emails_sent` = `True` (Strict read-only safety maintained)
 
 ---
 
@@ -155,12 +161,17 @@ Expected Output: All 26 free/included signals marked as `confirmed`.
 
 ## 7. Step 6: First Live Discovery Smoke Test ($0 Estimate First)
 
-Always estimate cost prior to running live collection.
+Always estimate cost prior to running live collection. Harvey supports both OSM (OpenStreetMap) and TinyFish search providers.
+
+### Provider Check: TinyFish Search Integration [VERIFIED]
+- **API Status:** Endpoint `/api/discover/providers` confirms `tinyfish` provider available with `status: ok, cost_per_query: 0.0, monthly_limit: 1000`.
+- **Criteria Gate:** Endpoint `/api/discovery/criteria` confirms active ICP: SaaS in Indore with geo-bounds and negative exclusions.
+- **Cost Estimate:** Endpoint `/api/discover/estimate` confirms projected spend is strictly `$0.00` across all generated queries.
 
 ### Command [VERIFIED: CLI syntax tested]
 ```powershell
 # 1. Run estimate first (Safety Guard)
-.\.venv\Scripts\python.exe -m harvey discover --estimate --industry "SaaS" --city "Indore, Madhya Pradesh, India" --provider osm
+.\.venv\Scripts\python.exe -m harvey discover --estimate --industry "SaaS" --city "Indore, Madhya Pradesh, India" --provider tinyfish
 
 # 2. Check projected cost is strictly $0.0000
 # Output will display: Estimated cost: $0.0000 (cap: $1.00)

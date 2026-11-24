@@ -1555,7 +1555,7 @@ async def get_prospects():
 def _state():
     from harvey.state import StateManager
     from harvey.paths import get_db_path
-    current_db = get_db_path()
+    current_db = DB_PATH if DB_PATH is not None else get_db_path()
     return StateManager(db_path=str(current_db))
 
 
@@ -2633,6 +2633,7 @@ def _discovery_queries(body: dict, config):
         depth=int(body.get("depth") or 30),
         limit=int(body.get("limit") or 100),
         preset=preset,
+        expand_queries=bool(body.get("expand_queries", True)),
     )
 
 

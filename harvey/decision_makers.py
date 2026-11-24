@@ -118,7 +118,22 @@ def load_roles_config(config_path: str | Path | None = None) -> DecisionMakerRol
             "chief product officer": "cxo",
             "cro": "cxo",
             "chief revenue officer": "cxo",
-            "president": "other_leadership",
+            "commissioner": "public_official",
+            "deputy commissioner": "public_official",
+            "executive deputy commissioner": "public_official",
+            "secretary": "public_official",
+            "governor": "public_official",
+            "administrator": "public_official",
+            "chancellor": "higher_ed_leader",
+            "vice chancellor": "higher_ed_leader",
+            "provost": "higher_ed_leader",
+            "dean": "higher_ed_leader",
+            "executive director": "association_leader",
+            "chair": "association_leader",
+            "vice chair": "association_leader",
+            "treasurer": "association_leader",
+            "president": "executive",
+            "chief": "executive",
             "partner": "other_leadership",
             "principal": "other_leadership",
             "chairman": "other_leadership",
@@ -396,34 +411,43 @@ def _is_verbatim_evidence(evidence: str, page_html: str, page_text: str) -> bool
     return (norm_ev in norm_html) or (norm_ev in norm_text)
 
 
+_TRUE_ASSISTANT = re.compile(
+    r"\b(?:assistant(?:\s+to)?|executive\s+assistant|to\s+the|aide)\b", re.I
+)
+
+
 def categorize_title(title: str, config: DecisionMakerRolesConfig) -> str | None:
     """Map a job title to its role_category, excluding subordinates and former roles."""
     if not title:
         return None
     clean = _normalize_ws(title)
-    if _FORMER.search(clean) or _SUBORDINATE.search(clean):
+    if _FORMER.search(clean) or _TRUE_ASSISTANT.search(clean):
         return None
 
     low = clean.lower()
     # Check exact / word boundary matches against configured role mappings
-    # Priority order: founder, ceo, cto, cfo, coo, cxo, director, owner, other_leadership
     priority_order = [
         "founder", "ceo", "cto", "cfo", "coo", "cxo",
+        "public_official", "association_leader", "higher_ed_leader", "executive",
         "director", "owner", "other_leadership"
     ]
-    matched_categories: list[tuple[int, str]] = []
+    matched_categories: list[tuple[int, int, str]] = []
 
-    for phrase, category in config.role_mappings.items():
+    sorted_phrases = sorted(config.role_mappings.items(), key=lambda kv: len(kv[0]), reverse=True)
+    for phrase, category in sorted_phrases:
         if re.search(rf"\b{re.escape(phrase)}\b", low, re.I):
             prio = priority_order.index(category) if category in priority_order else 99
-            matched_categories.append((prio, category))
+            matched_categories.append((prio, -len(phrase), category))
 
     if matched_categories:
-        matched_categories.sort(key=lambda x: x[0])
-        return matched_categories[0][1]
+        matched_categories.sort(key=lambda x: (x[0], x[1]))
+        return matched_categories[0][2]
 
     if re.search(config.generic_cxo_regex, low):
         return "cxo"
+
+    if _SUBORDINATE.search(clean):
+        return None
 
     return None
 
@@ -706,14 +730,36 @@ def extract_people_from_cards_and_headings(
 
     # 2. Inline delimiter patterns: "Jane Doe - Chief Technology Officer" or "Jane Doe, CEO"
     delimiter_pattern = re.compile(
-        r"^([A-Z][a-zA-Z\s\.\-]{2,40})\s*[\-–—|:]\s*([A-Za-z\s,\/]{3,60})$"
+        r"^([A-Z][a-zA-Z\s\.\-]{2,40})\s*[\-–—|:]\s*([A-Za-z\s,\/&\.]{3,70})$"
     )
-    for tag in soup.find_all(["p", "li", "span", "h3", "h4"]):
+    delimiter_rev_pattern = re.compile(
+        r"^([A-Za-z\s,\/&\.]{3,70})\s*[\-–—|:]\s*([A-Z][a-zA-Z\s\.\-]{2,40})$"
+    )
+    prefix_pattern = re.compile(
+        r"^(Executive\s+Deputy\s+Commissioner|Deputy\s+Commissioner|Commissioner|Secretary|Governor|Administrator|Chancellor|Vice\s+Chancellor|Provost|Dean|Executive\s+Director|Director|President|Chair|Chairman|Chairperson)\s+([A-Z][a-zA-Z\s\.\-]{2,40})$",
+        re.I
+    )
+
+    for tag in soup.find_all(["p", "li", "span", "h1", "h2", "h3", "h4", "h5", "h6"]):
         tag_text = _normalize_ws(tag.get_text(separator=" "))
         m = delimiter_pattern.match(tag_text)
+        cand_name = ""
+        cand_title = ""
         if m:
             cand_name = m.group(1).strip()
             cand_title = m.group(2).strip()
+        else:
+            m_rev = delimiter_rev_pattern.match(tag_text)
+            if m_rev:
+                cand_title = m_rev.group(1).strip()
+                cand_name = m_rev.group(2).strip()
+            else:
+                m_pref = prefix_pattern.match(tag_text)
+                if m_pref:
+                    cand_title = m_pref.group(1).strip()
+                    cand_name = m_pref.group(2).strip()
+
+        if cand_name and cand_title:
             if cand_title.lower().startswith(cand_name.lower()):
                 cand_title = _normalize_ws(cand_title[len(cand_name):].lstrip(" -–—|:,/"))
             if _is_valid_person_name(cand_name, config) and not title_names_other_org(cand_title, domain):
@@ -739,6 +785,176 @@ def extract_people_from_cards_and_headings(
                         extraction_method="card",
                         reason=reason,
                     ))
+
+    return candidates
+
+
+def extract_people_from_tables(
+    raw_html: str,
+    source_url: str,
+    page_id: str,
+    domain: str,
+    config: DecisionMakerRolesConfig,
+) -> list[DecisionMakerCandidate]:
+    """Extract persons with leadership titles from HTML <table> rows (<tr><td>Name</td><td>Title</td></tr>)."""
+    candidates: list[DecisionMakerCandidate] = []
+    if not raw_html:
+        return candidates
+
+    soup = BeautifulSoup(raw_html, "html.parser")
+    _clean_soup_for_people(soup)
+
+    for tr in soup.find_all("tr"):
+        cells = tr.find_all(["td", "th"])
+        if len(cells) < 2 or len(cells) > 5:
+            continue
+
+        cell_texts = [_normalize_ws(c.get_text(separator=" ")) for c in cells]
+        tr_text = _normalize_ws(tr.get_text(separator=" "))
+        if len(tr_text) > 400 or len(tr_text) < 5:
+            continue
+
+        for i, text_a in enumerate(cell_texts):
+            for j, text_b in enumerate(cell_texts):
+                if i == j or not text_a or not text_b:
+                    continue
+
+                if _is_valid_person_name(text_a, config) and not title_names_other_org(text_b, domain):
+                    cat = categorize_title(text_b, config)
+                    if cat:
+                        ev = tr_text[:300]
+                        status = "verified" if (text_a in ev and text_b in ev) else "unverified"
+                        reason = "" if status == "verified" else "Table row text does not contain both name and title"
+                        candidates.append(DecisionMakerCandidate(
+                            full_name=text_a,
+                            title=text_b,
+                            role_category=cat,
+                            source_url=source_url,
+                            source_page_id=page_id,
+                            evidence_text=ev,
+                            confidence=config.confidence_scores.get("table_row", 0.9),
+                            verification_status=status,
+                            extraction_method="table_row",
+                            reason=reason,
+                        ))
+                        break
+            else:
+                continue
+            break
+
+    return candidates
+
+
+def extract_people_from_definition_lists(
+    raw_html: str,
+    source_url: str,
+    page_id: str,
+    domain: str,
+    config: DecisionMakerRolesConfig,
+) -> list[DecisionMakerCandidate]:
+    """Extract persons with leadership titles from HTML <dl> definition lists (<dt>Name</dt><dd>Title</dd>)."""
+    candidates: list[DecisionMakerCandidate] = []
+    if not raw_html:
+        return candidates
+
+    soup = BeautifulSoup(raw_html, "html.parser")
+    _clean_soup_for_people(soup)
+
+    for dl in soup.find_all("dl"):
+        dts = dl.find_all("dt")
+        for dt in dts:
+            dd = dt.find_next_sibling("dd")
+            if not dd:
+                continue
+
+            dt_text = _normalize_ws(dt.get_text(separator=" "))
+            dd_text = _normalize_ws(dd.get_text(separator=" "))
+            if not dt_text or not dd_text:
+                continue
+
+            name_cand, title_cand = None, None
+            if _is_valid_person_name(dt_text, config) and not title_names_other_org(dd_text, domain):
+                if categorize_title(dd_text, config):
+                    name_cand, title_cand = dt_text, dd_text
+            elif _is_valid_person_name(dd_text, config) and not title_names_other_org(dt_text, domain):
+                if categorize_title(dt_text, config):
+                    name_cand, title_cand = dd_text, dt_text
+
+            if name_cand and title_cand:
+                cat = categorize_title(title_cand, config)
+                if cat:
+                    parent_text = _normalize_ws(dl.get_text(separator=" "))
+                    ev = parent_text[:300] if len(parent_text) <= 300 and name_cand in parent_text and title_cand in parent_text else f"{name_cand} {title_cand}"
+                    candidates.append(DecisionMakerCandidate(
+                        full_name=name_cand,
+                        title=title_cand,
+                        role_category=cat,
+                        source_url=source_url,
+                        source_page_id=page_id,
+                        evidence_text=ev,
+                        confidence=config.confidence_scores.get("definition_list", 0.9),
+                        verification_status="verified",
+                        extraction_method="definition_list",
+                        reason="",
+                    ))
+
+    return candidates
+
+
+def extract_people_from_heading_siblings(
+    raw_html: str,
+    source_url: str,
+    page_id: str,
+    domain: str,
+    config: DecisionMakerRolesConfig,
+) -> list[DecisionMakerCandidate]:
+    """Extract persons with leadership titles from heading + sibling elements (<h3>Name</h3><p>Title</p>)."""
+    candidates: list[DecisionMakerCandidate] = []
+    if not raw_html:
+        return candidates
+
+    soup = BeautifulSoup(raw_html, "html.parser")
+    _clean_soup_for_people(soup)
+
+    for h in soup.find_all(["h1", "h2", "h3", "h4", "h5", "h6"]):
+        h_text = _normalize_ws(h.get_text(separator=" "))
+        if not h_text or len(h_text) > 80:
+            continue
+
+        sib = h.find_next_sibling()
+        if not sib or sib.name not in ["p", "span", "div", "h4", "h5", "h6", "small"]:
+            continue
+
+        sib_text = _normalize_ws(sib.get_text(separator=" "))
+        if not sib_text or len(sib_text) > 80:
+            continue
+
+        name_cand, title_cand = None, None
+        if _is_valid_person_name(h_text, config) and not title_names_other_org(sib_text, domain):
+            if categorize_title(sib_text, config):
+                name_cand, title_cand = h_text, sib_text
+        elif _is_valid_person_name(sib_text, config) and not title_names_other_org(h_text, domain):
+            if categorize_title(h_text, config):
+                name_cand, title_cand = sib_text, h_text
+
+        if name_cand and title_cand:
+            cat = categorize_title(title_cand, config)
+            if cat:
+                parent = h.parent
+                parent_text = _normalize_ws(parent.get_text(separator=" ")) if parent else f"{h_text} {sib_text}"
+                ev = parent_text[:300] if len(parent_text) <= 300 and name_cand in parent_text and title_cand in parent_text else f"{h_text} {sib_text}"
+                candidates.append(DecisionMakerCandidate(
+                    full_name=name_cand,
+                    title=title_cand,
+                    role_category=cat,
+                    source_url=source_url,
+                    source_page_id=page_id,
+                    evidence_text=ev,
+                    confidence=config.confidence_scores.get("heading_sibling", 0.9),
+                    verification_status="verified",
+                    extraction_method="heading_sibling",
+                    reason="",
+                ))
 
     return candidates
 
@@ -938,8 +1154,14 @@ async def find_decision_makers(
                 page_candidates.extend(extract_people_from_jsonld(raw_html, p_url, p_id, target_domain, roles_config))
                 # 2. Cards and list structures
                 page_candidates.extend(extract_people_from_cards_and_headings(raw_html, p_url, p_id, target_domain, roles_config))
+                # 3. HTML <table> rows
+                page_candidates.extend(extract_people_from_tables(raw_html, p_url, p_id, target_domain, roles_config))
+                # 4. Definition lists (<dl>)
+                page_candidates.extend(extract_people_from_definition_lists(raw_html, p_url, p_id, target_domain, roles_config))
+                # 5. Heading siblings (<h3>Name</h3><p>Title</p>)
+                page_candidates.extend(extract_people_from_heading_siblings(raw_html, p_url, p_id, target_domain, roles_config))
 
-            # 3. Prose sentences (from text or html)
+            # 6. Prose sentences (from text or html)
             page_candidates.extend(extract_people_from_prose(raw_html, raw_text, p_url, p_id, target_domain, roles_config))
 
             # Invariant check: title must not start with or contain full_name
@@ -1013,7 +1235,11 @@ async def find_decision_makers(
     final_people = list(merged.values())
 
     # Sort candidates by confidence desc, role priority
-    role_priority = ["founder", "owner", "ceo", "cto", "cfo", "coo", "cxo", "director", "other_leadership"]
+    role_priority = [
+        "founder", "owner", "ceo", "cto", "cfo", "coo", "cxo",
+        "public_official", "association_leader", "higher_ed_leader", "executive",
+        "director", "other_leadership"
+    ]
     final_people.sort(key=lambda p: (
         -p.confidence,
         role_priority.index(p.role_category) if p.role_category in role_priority else 99,

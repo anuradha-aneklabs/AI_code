@@ -25,14 +25,11 @@ _TRANSLATION_NETWORKS = (
 )
 
 
-def _public_address(value: str) -> str:
+def _public_address(value: str, *, allow_nat64_public: bool = False) -> str:
     """Reject special-use addresses, including IPv6 routes to embedded IPv4."""
     if "%" in value:
         raise ValueError("Scoped addresses are not public website targets")
     address = ipaddress.ip_address(value)
-    if (not address.is_global or address.is_multicast or address.is_reserved
-            or address.is_unspecified):
-        raise ValueError("Address is not public")
     if isinstance(address, ipaddress.IPv6Address):
         if (address.is_site_local or address.ipv4_mapped or address.sixtofour or address.teredo):
             raise ValueError("Translated IPv6 addresses are not supported")
@@ -43,6 +40,12 @@ def _public_address(value: str) -> str:
                         or embedded_v4.is_link_local or embedded_v4.is_reserved or embedded_v4.is_multicast
                         or embedded_v4.is_unspecified):
                     raise ValueError(f"NAT64 embedded address {embedded_v4} is not public")
+                if not allow_nat64_public:
+                    raise ValueError("NAT64 translation is rejected by default SSRF policy")
+                return str(address)
+    if (not address.is_global or address.is_multicast or address.is_reserved
+            or address.is_unspecified):
+        raise ValueError("Address is not public")
     return str(address)
 
 
@@ -85,10 +88,10 @@ class PublicHTTPTransport(httpx.AsyncBaseTransport):
                 )
                 addresses = list(dict.fromkeys(_public_address(row[4][0]) for row in answers))
                 if not addresses:
-                    raise ValueError("DNS returned no addresses")
+                    raise ValueError("DNS returned no valid public addresses")
                 # Many operator machines have no IPv6 route even when DNS
                 # publishes AAAA first. Prefer a validated IPv4 answer.
-                addresses.sort(key=lambda value: ipaddress.ip_address(value).version)
+                addresses.sort(key=lambda value: (ipaddress.ip_address(value).version != 4, value))
         except ValueError as exc:
             raise UnsafeURLError("Website resolves to a non-public destination", request=request) from exc
         except asyncio.TimeoutError as exc:

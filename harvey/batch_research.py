@@ -16,11 +16,14 @@ import json
 import logging
 import os
 import re
+import xml.etree.ElementTree as ET
+import zipfile
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from harvey.collectors.discover import classify_search_result
 from harvey.company_narrative import extract_company_narrative, is_valid_service_name
 from harvey.decision_makers import find_decision_makers
 from harvey.entity_cross_check import check_entity_match
@@ -41,6 +44,16 @@ def _utcnow() -> str:
 def _new_id() -> str:
     import uuid
     return uuid.uuid4().hex[:12]
+
+
+def mask_name(name: str | None) -> str:
+    """Mask personal name to initials (e.g. 'Rick Testa' -> 'R. T.', 'Doug' -> 'D.')."""
+    if not name or not str(name).strip():
+        return "—"
+    parts = [p.strip() for p in str(name).strip().split() if p.strip()]
+    if not parts:
+        return "—"
+    return " ".join(f"{p[0].upper()}." for p in parts)
 
 
 def mask_email(email: str) -> str:
@@ -90,6 +103,88 @@ def load_import_columns_config(config_path: str | Path | None = None) -> dict[st
 _EMAIL_NEGATIVE_RE = re.compile(r"(valid|status|verified|score|flag)", re.IGNORECASE)
 
 
+def _col_letters_to_index(col_letters: str) -> int:
+    """Convert column letters like 'A', 'Z', 'AA', 'ZZ' to 0-based column index."""
+    idx = 0
+    for char in col_letters.upper():
+        if "A" <= char <= "Z":
+            idx = idx * 26 + (ord(char) - ord("A") + 1)
+    return max(0, idx - 1)
+
+
+def _read_xlsx_stdlib(content_bytes: bytes) -> list[list[str]]:
+    """Read .xlsx workbook using only stdlib zipfile and xml.etree.ElementTree.
+
+    Handles shared strings, inline strings, numbers, empty cells, columns beyond Z,
+    and formulas read as cached values.
+    """
+    with zipfile.ZipFile(io.BytesIO(content_bytes)) as z:
+        # 1. Read shared strings if present
+        shared_strings: list[str] = []
+        if "xl/sharedStrings.xml" in z.namelist():
+            ss_tree = ET.fromstring(z.read("xl/sharedStrings.xml"))
+            for si in ss_tree:
+                txt = "".join(node.text or "" for node in si.iter() if node.tag.endswith("t"))
+                shared_strings.append(txt)
+
+        # 2. Determine target worksheet
+        sheet_path = "xl/worksheets/sheet1.xml"
+        if sheet_path not in z.namelist():
+            ws_candidates = [n for n in z.namelist() if n.startswith("xl/worksheets/sheet") and n.endswith(".xml")]
+            if ws_candidates:
+                sheet_path = sorted(ws_candidates)[0]
+            else:
+                return []
+
+        # 3. Parse worksheet XML
+        sheet_tree = ET.fromstring(z.read(sheet_path))
+
+        raw_rows: list[list[str]] = []
+        for row_elem in sheet_tree.iter():
+            if not row_elem.tag.endswith("row"):
+                continue
+
+            cell_dict: dict[int, str] = {}
+            for c_elem in row_elem:
+                if not c_elem.tag.endswith("c"):
+                    continue
+
+                r_coord = c_elem.attrib.get("r", "")
+                t_attr = c_elem.attrib.get("t", "")
+
+                col_match = re.match(r"^([A-Za-z]+)", r_coord)
+                if col_match:
+                    col_idx = _col_letters_to_index(col_match.group(1))
+                else:
+                    col_idx = len(cell_dict)
+
+                val = ""
+                if t_attr == "s":
+                    v_node = next((n for n in c_elem if n.tag.endswith("v")), None)
+                    if v_node is not None and v_node.text and v_node.text.isdigit():
+                        s_idx = int(v_node.text)
+                        if 0 <= s_idx < len(shared_strings):
+                            val = shared_strings[s_idx]
+                elif t_attr == "inlineStr":
+                    val = "".join(node.text or "" for node in c_elem.iter() if node.tag.endswith("t"))
+                elif t_attr == "b":
+                    v_node = next((n for n in c_elem if n.tag.endswith("v")), None)
+                    val = "True" if v_node is not None and v_node.text == "1" else "False"
+                else:
+                    v_node = next((n for n in c_elem if n.tag.endswith("v")), None)
+                    if v_node is not None and v_node.text:
+                        val = v_node.text
+
+                cell_dict[col_idx] = val
+
+            if cell_dict:
+                max_c = max(cell_dict.keys())
+                row_vals = [cell_dict.get(c, "") for c in range(max_c + 1)]
+                raw_rows.append(row_vals)
+
+        return raw_rows
+
+
 def _norm_header(s: str) -> str:
     """Normalize header string: lowercase and remove spaces, hyphens, and underscores."""
     return re.sub(r"[\s_\-]+", "", s.lower().strip())
@@ -109,15 +204,7 @@ def parse_import_file(
     ext = Path(filename).suffix.lower()
 
     if ext == ".xlsx":
-        try:
-            import openpyxl
-        except ImportError:
-            raise ValueError(
-                "Excel (.xlsx) support requires openpyxl, which is not installed. Please upload a .csv file."
-            )
-        wb = openpyxl.load_workbook(filename=io.BytesIO(content_bytes), data_only=True)
-        sheet = wb.active
-        raw_rows = list(sheet.iter_rows(values_only=True))
+        raw_rows = _read_xlsx_stdlib(content_bytes)
         if not raw_rows:
             return [], {}
         headers = [str(c or "").strip() for c in raw_rows[0]]
@@ -393,12 +480,19 @@ async def create_batch_from_file(
         rep_email = seen_domains[domain]
         dom_status = "pending" if idx <= max_domains else "skipped"
         dom_err = "" if idx <= max_domains else f"Exceeded max domains cap ({max_domains})"
+        dom_has_hint = any(
+            bool(r.get("company_name_hint", "").strip())
+            for r in validated_rows
+            if r.get("domain") == domain
+        )
+        init_entity_check = "pending" if dom_has_hint else "no_hint"
         await state.save_import_domain(
             domain_id=_new_id(),
             batch_id=batch_id,
             domain=domain,
             representative_email=rep_email,
             status=dom_status,
+            entity_check=init_entity_check,
             error=dom_err,
         )
 
@@ -408,6 +502,7 @@ async def create_batch_from_file(
         preview_rows.append({
             "row_number": r["row_number"],
             "name": r["raw_name"],
+            "name_masked": mask_name(r["raw_name"]),
             "company_name_hint": r.get("company_name_hint", ""),
             "email_masked": mask_email(r["raw_email"]),
             "phone_masked": mask_phone(r["raw_phone"]),
@@ -431,12 +526,94 @@ async def create_batch_from_file(
     }
 
 
+async def discover_website_candidate(
+    company_name: str,
+    api_key: str | None = None,
+    http_client: Any = None,
+    custom_endpoint: str | None = None,
+) -> dict[str, Any] | None:
+    """Opt-in search fallback to discover a company's website when domain verification is unavailable.
+
+    Searches via TinyFish (free) using company name hint, classifies top results,
+    and returns an unverified website_candidate if a company_homepage is identified.
+    Never fetches candidate pages or modifies the lead's email domain.
+    """
+    clean_name = (company_name or "").strip()
+    if not clean_name:
+        return None
+
+    key = api_key or os.environ.get("TINYFISH_API_KEY", "").strip()
+    if not key:
+        logger.info("Website discovery fallback skipped: no TINYFISH_API_KEY configured")
+        return None
+
+    query = f'"{clean_name}" official website'
+    endpoint = custom_endpoint or "https://api.search.tinyfish.ai"
+    headers = {
+        "X-API-Key": key,
+        "Accept": "application/json",
+    }
+    params = {
+        "query": query,
+        "page": 0,
+    }
+
+    try:
+        should_close = False
+        client = http_client
+        if client is None:
+            import httpx
+            client = httpx.AsyncClient(timeout=10.0)
+            should_close = True
+
+        try:
+            resp = await client.get(endpoint, headers=headers, params=params)
+            resp.raise_for_status()
+            data = resp.json()
+        finally:
+            if should_close:
+                await client.aclose()
+
+        results = data.get("results") if isinstance(data, dict) else []
+        if not isinstance(results, list):
+            return None
+
+        for idx, item in enumerate(results[:5]):
+            if not isinstance(item, dict):
+                continue
+            cand_url = item.get("url", "").strip()
+            cand_title = item.get("title", "").strip()
+            cand_snippet = item.get("snippet", "") or item.get("description", "")
+            if not cand_url:
+                continue
+
+            res_class, res_reason = classify_search_result(cand_url, cand_title)
+            if res_class == "company_homepage":
+                return {
+                    "candidate_url": cand_url,
+                    "search_query": query,
+                    "rank": idx + 1,
+                    "snippet": cand_snippet,
+                    "result_class": res_class,
+                    "result_class_reason": res_reason,
+                    "status": "unverified",
+                    "origin": "search_discovery_fallback",
+                    "evidence": f"Rank {idx + 1} for '{query}': {cand_title} ({cand_url})",
+                }
+
+    except Exception as e:
+        logger.warning("Website discovery fallback failed for %s: %s", clean_name, e)
+
+    return None
+
+
 async def run_batch(
     batch_id: str,
     state: StateManager,
     max_domains: int | None = None,
     resume: bool = False,
     force: bool = False,
+    enable_website_discovery_fallback: bool = False,
 ) -> dict[str, Any]:
     """Execute batch research pipeline sequentially domain by domain.
     
@@ -533,9 +710,17 @@ async def run_batch(
                         entity_check = "match"
                         entity_check_evidence = ec_ev
                         break
-                if entity_check != "match":
+                    elif ec_stat == "partial_match" and entity_check != "match":
+                        entity_check = "partial_match"
+                        entity_check_evidence = ec_ev
+                if entity_check not in ("match", "partial_match"):
                     entity_check = "no_match"
-                    entity_check_evidence = ""
+                    entity_check_evidence = "Domain content does not verify company name hint; domain may belong to a filer, consultant or parent organisation"
+
+            # Website discovery fallback (Opt-In)
+            website_candidate = None
+            if web_status == "unavailable" and enable_website_discovery_fallback and domain_hints:
+                website_candidate = await discover_website_candidate(domain_hints[0])
 
             stage_summary = {
                 "website_status": web_status,
@@ -547,6 +732,9 @@ async def run_batch(
                 "entity_check": entity_check,
                 "entity_check_evidence": entity_check_evidence,
             }
+            if website_candidate:
+                stage_summary["website_candidate"] = website_candidate
+                stage_summary["possible_website"] = f"possible website (unverified): {website_candidate['candidate_url']} (source: search)"
 
             dom_end = _utcnow()
             dom_status = "completed"
@@ -762,7 +950,18 @@ async def export_batch_results(
 
                 web_status = website.get("verification_status", "unavailable")
                 web_url = website.get("final_url", "")
-                if web_status == "unavailable" and not web_url:
+
+                stage_summary_raw = d_rec.get("stage_summary_json") or "{}"
+                try:
+                    stg_sum = json.loads(stage_summary_raw) if isinstance(stage_summary_raw, str) else stage_summary_raw
+                except Exception:
+                    stg_sum = {}
+                cand_info = stg_sum.get("website_candidate") if isinstance(stg_sum, dict) else None
+
+                if cand_info:
+                    cand_url = cand_info.get("candidate_url", "")
+                    web_url = f"possible website (unverified): {cand_url} (source: search)"
+                elif web_status == "unavailable" and not web_url:
                     web_url = f"unavailable: {website.get('reason', 'Website unreachable or DNS failed')}"
 
                 # Entity check display

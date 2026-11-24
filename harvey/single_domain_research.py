@@ -267,15 +267,36 @@ class DomainRateLimiter:
 
 # ── SSRF Utilities ────────────────────────────────────────────────────
 
+_TRANSLATION_NETWORKS = (
+    ipaddress.ip_network("64:ff9b::/96"),
+    ipaddress.ip_network("64:ff9b:1::/48"),
+)
+
+
 def _is_private_or_loopback_ip(ip_str: str) -> bool:
-    """Check if an IP string is loopback, private, link-local, or cloud metadata."""
+    """Check if an IP string is loopback, private, link-local, or cloud metadata.
+    
+    Accepts public IPv4 addresses embedded in NAT64 translation networks.
+    """
     try:
         addr = ipaddress.ip_address(ip_str)
-        if not addr.is_global or addr.is_loopback or addr.is_private or addr.is_link_local or addr.is_reserved or addr.is_unspecified:
-            return True
         if isinstance(addr, ipaddress.IPv6Address):
+            for network in _TRANSLATION_NETWORKS:
+                if addr in network:
+                    embedded_v4 = ipaddress.ip_address(addr.packed[-4:])
+                    return (
+                        not embedded_v4.is_global
+                        or embedded_v4.is_private
+                        or embedded_v4.is_loopback
+                        or embedded_v4.is_link_local
+                        or embedded_v4.is_reserved
+                        or embedded_v4.is_multicast
+                        or embedded_v4.is_unspecified
+                    )
             if addr.is_site_local or addr.ipv4_mapped or addr.sixtofour or addr.teredo:
                 return True
+        if not addr.is_global or addr.is_loopback or addr.is_private or addr.is_link_local or addr.is_reserved or addr.is_unspecified:
+            return True
         return False
     except ValueError:
         return False
@@ -448,8 +469,16 @@ async def verify_website(
             evidence_text=ssrf_err,
         )
 
-    # 1. DNS Resolution check (with SSRF guard on resolved IPs)
-    dns_ok, dns_err = await _check_dns(domain)
+    # 1. DNS Resolution check (with SSRF guard and apex/www fallback)
+    dns_res = await _check_dns(domain)
+    if isinstance(dns_res, (tuple, list)) and len(dns_res) >= 3:
+        dns_ok, dns_err_code, dns_err_detail = dns_res[0], dns_res[1], dns_res[2]
+        dns_err = f"{dns_err_code}: {dns_err_detail}".strip(": ")
+    elif isinstance(dns_res, (tuple, list)) and len(dns_res) == 2:
+        dns_ok, dns_err = dns_res[0], dns_res[1]
+    else:
+        dns_ok, dns_err = False, str(dns_res)
+
     if not dns_ok:
         return WebsiteVerificationResult(
             dns_resolved=False,
@@ -469,7 +498,8 @@ async def verify_website(
         f"http://www.{domain}",
     ]
 
-    last_error = ""
+    last_error_code = "unavailable"
+    last_error_detail = ""
     last_status = 0
     headers = {"User-Agent": config.user_agent}
 
@@ -530,7 +560,19 @@ async def verify_website(
                     )
             elif 400 <= http_status < 600:
                 last_status = http_status
-                last_error = f"HTTP {http_status}"
+                text_lower = resp.text[:4000].lower()
+                is_bot = (http_status == 403 and any(
+                    m in text_lower for m in (
+                        "just a moment", "attention required", "cloudflare",
+                        "bot verification", "access denied", "ddos-guard", "cf-mitigated", "captcha"
+                    )
+                )) or "cf-ray" in resp.headers or "cf-mitigated" in resp.headers
+                if is_bot or http_status == 403:
+                    last_error_code = "bot_challenge" if is_bot else "http_403"
+                    last_error_detail = f"HTTP {http_status} (Cloudflare/Bot challenge)" if is_bot else f"HTTP {http_status} Forbidden"
+                else:
+                    last_error_code = f"http_{http_status}"
+                    last_error_detail = f"HTTP {http_status}"
                 continue
 
         except UnsafeURLError as e:
@@ -541,10 +583,36 @@ async def verify_website(
                 http_status=0,
                 verification_status="unavailable",
                 confidence=0.0,
-                evidence_text=f"SSRF blocked: {e}",
+                evidence_text=f"SSRF blocked (blocked_ssrf): {e}",
             )
+        except httpx.ConnectTimeout as e:
+            last_error_code = "timeout"
+            last_error_detail = f"Connection timeout: {e}"
+            continue
+        except httpx.ReadTimeout as e:
+            last_error_code = "timeout"
+            last_error_detail = f"Read timeout: {e}"
+            continue
+        except httpx.ConnectError as e:
+            err_str = str(e)
+            if "ssl" in err_str.lower() or "certificate" in err_str.lower():
+                last_error_code = "tls_error"
+                last_error_detail = f"TLS error: {e}"
+            else:
+                last_error_code = "timeout" if "timed out" in err_str.lower() else "unavailable"
+                last_error_detail = f"Connect error: {e}"
+            continue
         except httpx.RequestError as e:
-            last_error = f"{type(e).__name__}: {e}"
+            err_str = str(e)
+            if "ssl" in err_str.lower() or "certificate" in err_str.lower():
+                last_error_code = "tls_error"
+                last_error_detail = f"TLS error: {e}"
+            elif "timed out" in err_str.lower():
+                last_error_code = "timeout"
+                last_error_detail = f"Timeout: {e}"
+            else:
+                last_error_code = "unavailable"
+                last_error_detail = f"{type(e).__name__}: {e}"
             continue
 
     # If all candidates exhausted without 2xx
@@ -555,31 +623,68 @@ async def verify_website(
         http_status=last_status,
         verification_status="unavailable",
         confidence=0.0,
-        evidence_text=f"All candidate URLs failed. Last error: {last_error or 'No response'}",
+        evidence_text=f"{last_error_code}: {last_error_detail or 'All candidate URLs failed'}",
     )
 
 
-async def _check_dns(domain: str) -> tuple[bool, str]:
-    """Asynchronously verify domain DNS resolution with SSRF validation."""
+async def _check_dns(domain: str) -> tuple[bool, str, str]:
+    """Asynchronously verify domain DNS resolution with SSRF validation.
+    
+    Returns (ok, error_code, error_detail).
+    error_code is one of: "", "dns_nxdomain", "blocked_ssrf", "timeout".
+    """
     clean = domain.split(":")[0].strip().lower().rstrip(".")
     safe, err = _check_host_ssrf_safety(clean)
     if not safe:
-        return False, err
+        return False, "blocked_ssrf", err
 
     loop = asyncio.get_running_loop()
-    try:
-        answers = await loop.getaddrinfo(clean, None, family=socket.AF_UNSPEC, type=socket.SOCK_STREAM)
-        if not answers:
-            return False, "DNS returned no addresses"
-        for row in answers:
-            ip_str = row[4][0]
-            if _is_private_or_loopback_ip(ip_str):
-                return False, f"SSRF blocked: domain resolves to non-public destination ({ip_str})"
-        return True, ""
-    except socket.gaierror as e:
-        return False, str(e)
-    except Exception as e:
-        return False, str(e)
+    hosts_to_try = [clean]
+    if not clean.startswith("www."):
+        hosts_to_try.append(f"www.{clean}")
+
+    last_error_code = "dns_nxdomain"
+    last_error_detail = ""
+
+    for host in hosts_to_try:
+        try:
+            answers = await asyncio.wait_for(
+                loop.getaddrinfo(host, None, family=socket.AF_UNSPEC, type=socket.SOCK_STREAM),
+                timeout=5.0,
+            )
+            if not answers:
+                last_error_code = "dns_nxdomain"
+                last_error_detail = f"DNS returned no addresses for {host}"
+                continue
+
+            public_ips = []
+            has_private_ip = False
+            for row in answers:
+                ip_str = row[4][0]
+                if _is_private_or_loopback_ip(ip_str):
+                    has_private_ip = True
+                else:
+                    public_ips.append(ip_str)
+
+            if public_ips:
+                return True, "", ""
+            elif has_private_ip:
+                last_error_code = "blocked_ssrf"
+                last_error_detail = f"SSRF blocked: {host} resolves only to non-public destinations"
+            else:
+                last_error_code = "dns_nxdomain"
+                last_error_detail = f"No public IP addresses for {host}"
+        except asyncio.TimeoutError:
+            last_error_code = "timeout"
+            last_error_detail = f"DNS resolution timed out for {host}"
+        except socket.gaierror as e:
+            last_error_code = "dns_nxdomain"
+            last_error_detail = f"DNS NXDOMAIN / lookup error for {host}: {e}"
+        except Exception as e:
+            last_error_code = "dns_nxdomain"
+            last_error_detail = str(e)
+
+    return False, last_error_code, last_error_detail
 
 
 # ── Stage 4: Page Discovery ───────────────────────────────────────────
