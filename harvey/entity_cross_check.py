@@ -37,13 +37,31 @@ def load_entity_check_rules(config_path: str | Path | None = None) -> dict[str, 
     return DEFAULT_ENTITY_RULES
 
 
+def extract_domain_sld(domain_or_url: str | None) -> str:
+    """Extract Second-Level Domain (SLD) or primary brand name from domain/URL."""
+    if not domain_or_url:
+        return ""
+    clean = str(domain_or_url).lower().strip()
+    if "://" in clean:
+        from urllib.parse import urlparse
+        clean = urlparse(clean).netloc or ""
+    clean = clean.split(":")[0]
+    if clean.startswith("www."):
+        clean = clean[4:]
+    parts = clean.split(".")
+    if len(parts) >= 2:
+        return parts[0]
+    return clean
+
+
 def check_entity_match(
     company_name_hint: str,
     pages: list[dict[str, Any]] | None = None,
     website: dict[str, Any] | None = None,
     rules: dict[str, Any] | None = None,
+    domain: str | None = None,
 ) -> tuple[str, str]:
-    """Cross-check company_name_hint against website pages, title, and metadata.
+    """Cross-check company_name_hint against website pages, title, domain SLD, and metadata.
     
     Returns (status, evidence_snippet):
       - status: 'match', 'no_match', or 'no_hint'
@@ -67,6 +85,19 @@ def check_entity_match(
     if not sig_tokens:
         return ("no_hint", "")
 
+    # 1. Check Domain SLD (Second-Level Domain) against significant tokens
+    # e.g., CARGILL FOODS INC. vs cargill.com -> SLD 'cargill' matches primary token
+    dom_candidate = domain or ""
+    if not dom_candidate and website:
+        dom_candidate = website.get("domain") or website.get("final_url") or ""
+    sld = extract_domain_sld(dom_candidate)
+    if sld:
+        if sld in sig_tokens:
+            return ("match", f"Domain SLD '{sld}' matches entity brand token '{sld}' (brand/parent relationship)")
+        for tok in sig_tokens:
+            if len(tok) >= 3 and len(sld) >= 3 and (tok == sld or (len(tok) >= 4 and (tok in sld or sld in tok))):
+                return ("match", f"Domain SLD '{sld}' matches entity brand token '{tok}' (brand/parent relationship)")
+
     # Build corpus from website title/description and page texts
     corpus_parts: list[str] = []
     if website:
@@ -88,7 +119,7 @@ def check_entity_match(
 
     corpus_lower = corpus.lower()
 
-    # 1. Check exact phrase of significant tokens
+    # 2. Check exact phrase of significant tokens
     sig_phrase = " ".join(sig_tokens)
     idx = corpus_lower.find(sig_phrase)
     if idx != -1:
@@ -97,8 +128,20 @@ def check_entity_match(
         snippet = re.sub(r"\s+", " ", corpus[start:end]).strip()
         return ("match", snippet)
 
-    # 2. Check if all significant tokens exist in corpus (or >= 80% if 3+ tokens)
+    # 3. Check if all significant tokens exist in corpus (or >= 75% if 3+ tokens, or primary brand if 2 tokens)
     matched = [t for t in sig_tokens if re.search(rf"\b{re.escape(t)}\b", corpus_lower)]
+
+    # If 2 tokens (e.g. Cargill Foods) and primary brand token (Cargill) matched
+    if len(sig_tokens) == 2 and len(matched) >= 1:
+        primary_token = sig_tokens[0]
+        if primary_token in matched and len(primary_token) >= 3:
+            m = re.search(rf"\b{re.escape(primary_token)}\b", corpus_lower)
+            if m:
+                start = max(0, m.start() - 40)
+                end = min(len(corpus), m.end() + 100)
+                snippet = re.sub(r"\s+", " ", corpus[start:end]).strip()
+                return ("match", snippet)
+
     threshold = len(sig_tokens) if len(sig_tokens) <= 2 else max(2, int(0.75 * len(sig_tokens)))
 
     if len(matched) >= threshold:

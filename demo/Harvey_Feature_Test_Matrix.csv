@@ -1,0 +1,30 @@
+Module,Feature / Flow,Status,Verification Method,Evidence / Result,Safety / PII Check
+Today,KPI Metrics Row,PASS,Browser DOM & API,"All counters rendered, 0 console errors",Compliant (Masked counts)
+Today,Need Human Queue,PASS,Browser DOM & API,Queue mounted with approval desk,Compliant
+Today,Setup Checklist,PASS,Browser DOM & API,Configured steps verified,Compliant
+Discover,Business Profile Selector,PASS,Browser DOM & API,"CleanTech, SaaS, Legal profiles loaded",Zero external paid calls
+Discover,Lead Qualification,PASS,Browser DOM & API,Qualification badges and reasons rendered,Compliant
+Outbox,Draft Approval Desk,PASS,Browser DOM & API,Staged drafts pending human approval,Zero email dispatch
+Conversations,AI Reply Prioritization,PASS,Browser DOM & API,Sentiment and intent categories verified,Masked PII
+Signals,Signal Detector,PASS,Browser DOM & API,Trigger cards and detection filters active,Compliant
+CRM Pipeline,Kanban Stage Tracking,PASS,Browser DOM & API,Stages from Uncontacted to Won active,Compliant
+Companies,Organization Register,PASS,Browser DOM & API,Fit scores and detail drilldowns active,Compliant
+Contacts,Prospects Directory,PASS,Browser DOM & API,Contact records with masked email/phone,Strictly Masked
+Campaigns,Sequence Review,PASS,Browser DOM & API,Multi-step drafts and triggers rendered,Zero dispatch
+Knowledge,RAG Vector Store,PASS,Browser DOM & API,Document chunk index and semantic search,Compliant
+Activity,Agent Audit Log,PASS,Browser DOM & API,Chronological system activity tracked,Compliant
+Usage,Subscription Metrics,PASS,Browser DOM & API,Claude & Codex tokens & calls counted,$0 paid costs
+Settings,Credentials Security,PASS,Browser DOM & API,"Secrets guarded in .env, never exposed",Compliant
+Research,Sidebar Navigation,PASS,Browser DOM & API,Research button under Pipeline group,Compliant
+Research,CSV/Excel Upload,PASS,Browser DOM & API,Upload and auto-detection of 5 columns,JSON compliant
+Research,Contact Preview,PASS,Browser DOM & API,First 5 rows displayed with masked PII,Strictly Masked
+Research,Domain Extraction,PASS,Unit Test & API,"Valid domains extracted, free-mail skipped",Compliant
+Research,Website Verification,PASS,Unit Test & API,"Website status verified, final URL stored",Compliant
+Research,Narrative Extraction,PASS,Browser & API,"Overview, Services, Vision, Mission rendered",Discrete chips
+Research,Leadership Discovery,PASS,Browser & API,"Founders, CEOs, CXOs discovered with evidence",Verified
+Research,Entity Cross-Check,PASS,Unit Test & Browser,"Cargill SLD matching verified, no false warning",Verified Match
+Research,Progress & Polling,PASS,Browser & API,Live progress banner with percentage fill,Active polling
+Research,Resume Capability,PASS,Browser & API,Resume incomplete runs supported cleanly,Compliant
+Research,Details Modal,PASS,Browser DOM,Rich modal with full quotes & source links,Compliant
+Research,CSV Export,PASS,Browser Download,contacts_results.csv downloaded,Strictly Masked
+Research,HTML Demo Export,PASS,Browser Download,Standalone report generated and downloaded,Strictly Masked

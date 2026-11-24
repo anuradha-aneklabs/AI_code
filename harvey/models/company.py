@@ -31,6 +31,8 @@ class Company(BaseModel):
     location_status: str = "location_unverified"
     location_evidence: str = ""
     location_evidence_url: str = ""
+    product_class: str = ""
+    product_class_evidence: str = ""
     # Buying signals: detected tools on their site, and timely triggers
     # (hiring, funding, ...) as [{"type": ..., "detail": ..., "found_at": ...}]
     tech_stack: list[str] = Field(default_factory=list)

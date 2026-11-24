@@ -316,6 +316,8 @@
 
       <button onclick="showTab('discover', this)"><svg class="icon" aria-hidden="true"><use href="#i-discover"/></svg><span class="label">Discover</span></button>
 
+      <button onclick="showTab('research', this)" id="nav-btn-research"><svg class="icon" aria-hidden="true"><use href="#i-discover"/></svg><span class="label">Research</span><span class="nav-count" id="nav-research"></span></button>
+
 
 
       <button onclick="showTab('crm-pipeline', this)" id="nav-btn-crm-pipeline"><svg class="icon" aria-hidden="true"><use href="#i-conversations"/></svg><span class="label">CRM Pipeline</span><span class="nav-count" id="nav-pipeline"></span></button>
@@ -1207,6 +1209,190 @@
 
 
 
+
+<!-- Batch Research -->
+
+<div id="research" class="section">
+
+  <div class="section-head" style="display:flex;justify-content:space-between;align-items:flex-start;flex-wrap:wrap;gap:12px;">
+    <div>
+      <h2>Batch Lead &amp; Company Research</h2>
+      <p>Upload CSV contacts, verify company websites, extract corporate narratives &amp; leadership, and cross-check business entities.</p>
+    </div>
+    <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;">
+      <select id="research-batch-select" class="form-input" style="width:auto;min-width:180px;height:32px;padding:2px 8px;font-size:12px;" onchange="onResearchBatchSelect(this.value)">
+        <option value="">No batches loaded</option>
+      </select>
+      <button class="btn btn-secondary btn-sm" onclick="loadResearchView()" title="Refresh research data">
+        <svg class="icon" aria-hidden="true"><use href="#i-refresh"/></svg> Refresh
+      </button>
+      <button class="btn btn-secondary btn-sm" id="btn-research-resume" onclick="resumeActiveBatch()" style="display:none;" title="Resume incomplete domain research">
+        <svg class="icon" aria-hidden="true"><use href="#i-arrow"/></svg> Resume Incomplete
+      </button>
+      <button class="btn btn-secondary btn-sm" onclick="exportResearchBatch('csv')" title="Download results CSV">
+        <svg class="icon" aria-hidden="true"><use href="#i-download"/></svg> Export CSV
+      </button>
+      <button class="btn btn-primary btn-sm" onclick="exportResearchBatch('html')" title="Download or view self-contained HTML report">
+        <svg class="icon" aria-hidden="true"><use href="#i-download"/></svg> Export HTML Report
+      </button>
+    </div>
+  </div>
+
+  <!-- Research Metrics Row (KPIs) -->
+  <div class="kpis" id="research-kpis">
+    <div class="kpi">
+      <div class="kpi-label">Total Contacts</div>
+      <div class="kpi-main"><span class="kpi-value zero" id="kpi-res-total-contacts">0</span></div>
+      <span class="kpi-note" id="kpi-res-total-note">Import rows parsed</span>
+    </div>
+    <div class="kpi">
+      <div class="kpi-label">Valid Contacts</div>
+      <div class="kpi-main"><span class="kpi-value zero" id="kpi-res-valid-contacts">0</span></div>
+      <span class="kpi-note" id="kpi-res-valid-note">Corporate domain emails</span>
+    </div>
+    <div class="kpi">
+      <div class="kpi-label">Unique Domains</div>
+      <div class="kpi-main"><span class="kpi-value zero" id="kpi-res-unique-domains">0</span></div>
+      <span class="kpi-note" id="kpi-res-domains-note">Distinct company targets</span>
+    </div>
+    <div class="kpi">
+      <div class="kpi-label">Websites Verified</div>
+      <div class="kpi-main"><span class="kpi-value zero" id="kpi-res-websites-verified">0</span></div>
+      <span class="kpi-note" id="kpi-res-web-note">Active live corporate sites</span>
+    </div>
+    <div class="kpi">
+      <div class="kpi-label">Companies Researched</div>
+      <div class="kpi-main"><span class="kpi-value zero" id="kpi-res-researched">0</span></div>
+      <span class="kpi-note" id="kpi-res-researched-note">Narratives &amp; people indexed</span>
+    </div>
+    <div class="kpi">
+      <div class="kpi-label">Decision Makers Found</div>
+      <div class="kpi-main"><span class="kpi-value zero" id="kpi-res-decision-makers">0</span></div>
+      <span class="kpi-note" id="kpi-res-dm-note">Founders, CEOs, Directors &amp; CXOs</span>
+    </div>
+    <div class="kpi">
+      <div class="kpi-label">Pending / Issues</div>
+      <div class="kpi-main"><span class="kpi-value zero" id="kpi-res-pending">0</span></div>
+      <span class="kpi-note" id="kpi-res-pending-note">In-progress or failed</span>
+    </div>
+  </div>
+
+  <!-- Live Status & Running Progress Banner -->
+  <div id="research-progress-banner" class="card" style="display:none;margin-bottom:16px;border-left:4px solid var(--accent);">
+    <div style="display:flex;justify-content:space-between;align-items:center;">
+      <div style="display:flex;align-items:center;gap:10px;">
+        <svg class="icon spin" style="width:20px;height:20px;color:var(--accent);"><use href="#i-refresh"/></svg>
+        <div>
+          <strong id="research-progress-title" style="font-size:14px;">Batch Research in Progress...</strong>
+          <div class="muted" id="research-progress-subtitle" style="font-size:12px;">Processing company domains sequentially</div>
+        </div>
+      </div>
+      <span class="badge t-active" id="research-progress-badge">Running</span>
+    </div>
+    <div style="background:var(--surface-2);border-radius:4px;height:6px;width:100%;margin-top:12px;overflow:hidden;">
+      <div id="research-progress-fill" style="background:var(--accent);height:100%;width:0%;transition:width 0.3s ease;"></div>
+    </div>
+  </div>
+
+  <!-- Upload & Preview Card -->
+  <div class="card" style="margin-bottom:16px;">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;cursor:pointer;" onclick="toggleResearchUploadPanel()">
+      <div style="display:flex;align-items:center;gap:8px;">
+        <svg class="icon"><use href="#i-flag"/></svg>
+        <h3 style="margin:0;font-size:14px;font-weight:600;">Upload Contact List (CSV / Excel)</h3>
+        <span class="badge t-idle" id="research-upload-toggle-label">Expand</span>
+      </div>
+      <span id="research-upload-chevron">&#9662;</span>
+    </div>
+    <div id="research-upload-body" style="display:none;">
+      <div style="display:flex;gap:12px;flex-wrap:wrap;align-items:flex-end;margin-bottom:12px;">
+        <div class="form-group" style="flex:2;min-width:240px;margin-bottom:0;">
+          <label class="form-label" for="research-file-input">Select Contacts CSV File *</label>
+          <input type="file" id="research-file-input" class="form-input" accept=".csv,.xlsx,.txt" onchange="onResearchFileSelected(this)">
+        </div>
+        <div class="form-group" style="flex:1;min-width:130px;margin-bottom:0;">
+          <label class="form-label" for="research-max-domains">Max Domains Cap</label>
+          <input type="number" id="research-max-domains" class="form-input" value="5" min="1" max="100">
+        </div>
+        <button class="btn btn-primary" id="btn-research-upload" onclick="uploadResearchFile()" disabled>
+          Upload &amp; Preview
+        </button>
+      </div>
+
+      <!-- Preview Container -->
+      <div id="research-upload-preview-container" style="display:none;margin-top:12px;">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
+          <div>
+            <strong>File Preview &amp; Column Detection</strong>
+            <span class="muted" id="research-preview-summary" style="font-size:12px;margin-left:8px;"></span>
+          </div>
+          <button class="btn btn-primary btn-sm" id="btn-start-batch-run" onclick="startActiveBatchRun()">
+            Start Research Run
+          </button>
+        </div>
+        <div id="research-detected-columns" style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:10px;"></div>
+        <div class="table-card" style="max-height:220px;overflow-y:auto;">
+          <table class="table" style="font-size:12px;">
+            <thead>
+              <tr>
+                <th>#</th>
+                <th>Name</th>
+                <th>Company Hint</th>
+                <th>Email (Masked)</th>
+                <th>Phone (Masked)</th>
+                <th>Domain</th>
+                <th>Status</th>
+              </tr>
+            </thead>
+            <tbody id="research-preview-tbody"></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Search & Filter Bar -->
+  <div class="card" style="padding:10px 14px;margin-bottom:14px;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px;">
+    <div style="display:flex;align-items:center;gap:10px;flex:1;min-width:260px;">
+      <input type="search" id="research-search-input" class="form-input" placeholder="Search company, domain, contact name, or leadership..." style="height:32px;font-size:12px;" oninput="filterResearchTable()">
+      <select id="research-filter-status" class="form-input" style="width:auto;min-width:150px;height:32px;font-size:12px;" onchange="filterResearchTable()">
+        <option value="all">All Domains &amp; Contacts</option>
+        <option value="verified">Websites Verified</option>
+        <option value="completed">Research Completed</option>
+        <option value="has_dm">Has Decision Makers</option>
+        <option value="entity_match">Entity Verified Match</option>
+        <option value="entity_nomatch">Entity Discrepancy</option>
+        <option value="pending_failed">Pending / Failed</option>
+      </select>
+    </div>
+    <div class="muted" style="font-size:12px;" id="research-table-count">Showing 0 domains</div>
+  </div>
+
+  <!-- Research Results Table -->
+  <div class="table-card">
+    <table class="table" id="research-results-table">
+      <thead>
+        <tr>
+          <th style="width:40px;">#</th>
+          <th style="min-width:160px;">Company / Hint</th>
+          <th style="min-width:140px;">Domain &amp; Website</th>
+          <th style="min-width:110px;">Entity Check</th>
+          <th style="min-width:200px;">Narrative &amp; Overview</th>
+          <th style="min-width:160px;">Core Services</th>
+          <th style="min-width:200px;">Decision Makers</th>
+          <th style="width:80px;text-align:right;">Details</th>
+        </tr>
+      </thead>
+      <tbody id="research-results-tbody">
+        <tr>
+          <td colspan="8" style="text-align:center;padding:32px;color:var(--text-3);">
+            No research batch loaded. Upload a contacts CSV file above or select an existing batch.
+          </td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+</div>
 
 <!-- Companies -->
 
@@ -2939,6 +3125,20 @@
     <div style="display:flex;justify-content:flex-end;align-items:center;border-top:1px solid var(--line);padding-top:14px;margin-top:16px;">
       <button class="btn btn-secondary btn-sm" onclick="closeCampaignReviewModal()">Close</button>
     </div>
+  </div>
+</div>
+
+<!-- Research Details Modal -->
+<div id="research-detail-modal" class="modal-backdrop" style="display:none;position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.7);z-index:9999;align-items:center;justify-content:center;padding:20px;">
+  <div class="modal-box card" style="max-width:820px;width:100%;max-height:85vh;overflow-y:auto;position:relative;background:var(--surface-1);border:1px solid var(--line);box-shadow:0 12px 32px rgba(0,0,0,0.5);">
+    <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:14px;border-bottom:1px solid var(--line);padding-bottom:10px;">
+      <div>
+        <h3 id="res-modal-company-title" style="margin:0 0 4px 0;font-size:18px;">Company Research Details</h3>
+        <span class="muted" id="res-modal-domain-sub" style="font-size:12px;"></span>
+      </div>
+      <button class="btn btn-secondary btn-sm" onclick="closeResearchDetailModal()">✕ Close</button>
+    </div>
+    <div id="res-modal-body"></div>
   </div>
 </div>
 

@@ -34,9 +34,15 @@ def _public_address(value: str) -> str:
             or address.is_unspecified):
         raise ValueError("Address is not public")
     if isinstance(address, ipaddress.IPv6Address):
-        if (address.is_site_local or address.ipv4_mapped or address.sixtofour or address.teredo
-                or any(address in network for network in _TRANSLATION_NETWORKS)):
+        if (address.is_site_local or address.ipv4_mapped or address.sixtofour or address.teredo):
             raise ValueError("Translated IPv6 addresses are not supported")
+        for network in _TRANSLATION_NETWORKS:
+            if address in network:
+                embedded_v4 = ipaddress.ip_address(address.packed[-4:])
+                if (not embedded_v4.is_global or embedded_v4.is_private or embedded_v4.is_loopback
+                        or embedded_v4.is_link_local or embedded_v4.is_reserved or embedded_v4.is_multicast
+                        or embedded_v4.is_unspecified):
+                    raise ValueError(f"NAT64 embedded address {embedded_v4} is not public")
     return str(address)
 
 

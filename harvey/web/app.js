@@ -824,6 +824,8 @@ function loadCurrentTab() {
 
     case 'discover': loadDiscoverProviders(); if (typeof loadBusinessProfiles === 'function') loadBusinessProfiles(); if (typeof loadDiscoveredLeads === 'function') loadDiscoveredLeads(); break;
 
+    case 'research': loadResearchView(); break;
+
     case 'crm-pipeline': loadCrmPipeline(); break;
 
     case 'companies': if (!companyDrill) loadCompanies(); break;
@@ -7363,5 +7365,601 @@ async function deleteRagDocument(source) {
     }
   } catch (err) {
     showToast('Delete error: ' + err, 'error');
+  }
+}
+
+// ── Batch Lead & Company Research ──
+
+let _researchBatches = [];
+let _activeResearchBatchId = null;
+let _researchDetails = null;
+let _researchPollTimer = null;
+let _selectedResearchFile = null;
+
+async function loadResearchView() {
+  try {
+    const res = await api('/api/research/batches');
+    const selectEl = document.getElementById('research-batch-select');
+    if (!res || !res.batches) {
+      if (selectEl) selectEl.innerHTML = '<option value="">No batches found</option>';
+      return;
+    }
+    _researchBatches = res.batches || [];
+    if (selectEl) {
+      if (_researchBatches.length === 0) {
+        selectEl.innerHTML = '<option value="">No batches loaded</option>';
+      } else {
+        selectEl.innerHTML = _researchBatches.map(b => {
+          const dt = b.created_at ? new Date(b.created_at).toLocaleDateString() : '';
+          const name = b.source_filename || 'Batch ' + b.id.slice(0, 8);
+          return '<option value="' + escHtml(b.id) + '">' + escHtml(name) + ' (' + (b.valid_rows || 0) + ' valid, ' + dt + ')</option>';
+        }).join('');
+      }
+    }
+
+    if (!_activeResearchBatchId && _researchBatches.length > 0) {
+      _activeResearchBatchId = _researchBatches[0].id;
+    }
+
+    if (selectEl && _activeResearchBatchId) {
+      selectEl.value = _activeResearchBatchId;
+    }
+
+    if (_activeResearchBatchId) {
+      await loadResearchBatchDetails(_activeResearchBatchId);
+    } else {
+      renderEmptyResearchState();
+    }
+  } catch (err) {
+    console.error('Error loading research view:', err);
+  }
+}
+
+function renderEmptyResearchState() {
+  const tbody = document.getElementById('research-results-tbody');
+  if (tbody) {
+    tbody.innerHTML = '<tr><td colspan="8" style="text-align:center;padding:36px;color:var(--text-3);">' +
+      '<div style="font-size:14px;font-weight:500;margin-bottom:6px;color:var(--text-2);">No Research Batch Selected</div>' +
+      '<div style="font-size:12px;">Upload a contacts CSV file above to start lead research, website verification &amp; leadership discovery.</div>' +
+      '</td></tr>';
+  }
+}
+
+async function loadResearchBatchDetails(batchId) {
+  if (!batchId) return;
+  _activeResearchBatchId = batchId;
+  try {
+    const res = await api('/api/research/batch/' + encodeURIComponent(batchId) + '/details');
+    if (!res || !res.success) {
+      return;
+    }
+    _researchDetails = res;
+
+    // Update KPI counters
+    const m = res.metrics || {};
+    updateKpiValue('kpi-res-total-contacts', m.total_contacts || 0);
+    updateKpiValue('kpi-res-valid-contacts', m.valid_contacts || 0);
+    updateKpiValue('kpi-res-unique-domains', m.unique_domains || 0);
+    updateKpiValue('kpi-res-websites-verified', m.websites_verified || 0);
+    updateKpiValue('kpi-res-researched', m.companies_researched || 0);
+    updateKpiValue('kpi-res-decision-makers', m.decision_makers_found || 0);
+    updateKpiValue('kpi-res-pending', m.pending_failed || 0);
+
+    // Nav counter
+    if (typeof navCount === 'function') {
+      navCount('nav-research', m.companies_researched || 0);
+    }
+
+    // Resume button visibility
+    const resumeBtn = document.getElementById('btn-research-resume');
+    if (resumeBtn) {
+      const hasIncomplete = (m.pending_failed || 0) > 0 && res.batch && res.batch.status !== 'running';
+      resumeBtn.style.display = hasIncomplete ? 'inline-flex' : 'none';
+    }
+
+    // Progress Banner & Polling
+    const banner = document.getElementById('research-progress-banner');
+    const fill = document.getElementById('research-progress-fill');
+    const badge = document.getElementById('research-progress-badge');
+    const subtitle = document.getElementById('research-progress-subtitle');
+
+    if (res.is_running || (res.batch && res.batch.status === 'running')) {
+      if (banner) banner.style.display = 'block';
+      const total = Math.max(1, m.unique_domains || 1);
+      const done = m.companies_researched || 0;
+      const pct = Math.min(100, Math.round((done / total) * 100));
+      if (fill) fill.style.width = pct + '%';
+      if (badge) { badge.className = 'badge t-active'; badge.textContent = 'Running (' + pct + '%)'; }
+      if (subtitle) subtitle.textContent = 'Researched ' + done + ' of ' + total + ' domains (' + pct + '% complete)...';
+
+      clearTimeout(_researchPollTimer);
+      _researchPollTimer = setTimeout(() => {
+        if (currentTab === 'research' && _activeResearchBatchId === batchId) {
+          loadResearchBatchDetails(batchId);
+        }
+      }, 2500);
+    } else {
+      if (banner) banner.style.display = 'none';
+      clearTimeout(_researchPollTimer);
+    }
+
+    // Render Table
+    renderResearchTable();
+  } catch (err) {
+    console.error('Failed to load batch details:', err);
+  }
+}
+
+function updateKpiValue(id, val) {
+  const el = document.getElementById(id);
+  if (el) {
+    el.textContent = String(val);
+    if (val > 0) el.classList.remove('zero');
+    else el.classList.add('zero');
+  }
+}
+
+function onResearchBatchSelect(batchId) {
+  if (batchId) {
+    _activeResearchBatchId = batchId;
+    loadResearchBatchDetails(batchId);
+  }
+}
+
+function toggleResearchUploadPanel() {
+  const body = document.getElementById('research-upload-body');
+  const label = document.getElementById('research-upload-toggle-label');
+  const chevron = document.getElementById('research-upload-chevron');
+  if (!body) return;
+  const isHidden = body.style.display === 'none';
+  body.style.display = isHidden ? 'block' : 'none';
+  if (label) label.textContent = isHidden ? 'Collapse' : 'Expand';
+  if (chevron) chevron.innerHTML = isHidden ? '&#9652;' : '&#9662;';
+}
+
+function onResearchFileSelected(input) {
+  const uploadBtn = document.getElementById('btn-research-upload');
+  if (input && input.files && input.files[0]) {
+    _selectedResearchFile = input.files[0];
+    if (uploadBtn) uploadBtn.disabled = false;
+  } else {
+    _selectedResearchFile = null;
+    if (uploadBtn) uploadBtn.disabled = true;
+  }
+}
+
+async function uploadResearchFile() {
+  const fileInput = document.getElementById('research-file-input');
+  const file = _selectedResearchFile || (fileInput && fileInput.files && fileInput.files[0]);
+  if (!file) return;
+  const uploadBtn = document.getElementById('btn-research-upload');
+  const maxCap = parseInt(document.getElementById('research-max-domains')?.value || '5', 10);
+  if (uploadBtn) { uploadBtn.disabled = true; uploadBtn.textContent = 'Uploading...'; }
+
+  try {
+    const isBinary = file.name.endsWith('.xlsx');
+    const readPromise = new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(reader.result);
+      reader.onerror = () => reject(reader.error);
+      if (isBinary) {
+        reader.readAsDataURL(file);
+      } else {
+        reader.readAsText(file, 'utf-8');
+      }
+    });
+
+    const fileContent = await readPromise;
+    const payload = {
+      filename: file.name,
+      max_domains: maxCap,
+    };
+    if (isBinary) {
+      payload.data_b64 = fileContent;
+    } else {
+      payload.content = fileContent;
+    }
+
+    const res = await authFetch('/api/research/batch', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    if (!res.ok) {
+      const errBody = await res.json().catch(() => ({}));
+      showToast(errBody.error || 'Upload failed', 'error');
+      return;
+    }
+    const data = await res.json();
+    if (data.success && data.batch) {
+      showToast('File uploaded and validated successfully!', 'success');
+      _activeResearchBatchId = data.batch.batch_id;
+
+      // Show preview
+      const previewCont = document.getElementById('research-upload-preview-container');
+      if (previewCont) previewCont.style.display = 'block';
+
+      const sumEl = document.getElementById('research-preview-summary');
+      if (sumEl) {
+        sumEl.textContent = `${data.batch.total_rows} rows parsed (${data.batch.valid_rows} valid), ${data.batch.unique_domains} unique domains (Cap: ${data.batch.max_domains})`;
+      }
+
+      // Column mapping badges
+      const colEl = document.getElementById('research-detected-columns');
+      if (colEl && data.batch.column_mapping) {
+        const cm = data.batch.column_mapping;
+        colEl.innerHTML = Object.entries(cm).map(([k, v]) => {
+          return `<span class="badge t-good" style="font-size:11px;">${escHtml(k)}: ${escHtml(v || 'none')}</span>`;
+        }).join('');
+      }
+
+      // Preview table rows
+      const tbody = document.getElementById('research-preview-tbody');
+      if (tbody && data.batch.preview) {
+        tbody.innerHTML = data.batch.preview.map(r => {
+          const stClass = r.row_status === 'valid' ? 't-good' : r.row_status === 'free_mail' ? 't-note' : 't-bad';
+          return `<tr>
+            <td>${escHtml(r.row_number)}</td>
+            <td><strong>${escHtml(r.name || '—')}</strong></td>
+            <td>${escHtml(r.company_name_hint || '—')}</td>
+            <td><code>${escHtml(r.email_masked || '—')}</code></td>
+            <td><code>${escHtml(r.phone_masked || '—')}</code></td>
+            <td>${escHtml(r.domain || '—')}</td>
+            <td><span class="badge ${stClass}">${escHtml(r.row_status)}</span></td>
+          </tr>`;
+        }).join('');
+      }
+
+      // Refresh batch selector and switch to this batch
+      await loadResearchView();
+    }
+  } catch (err) {
+    console.error('File upload failed:', err);
+    showToast('Upload error: ' + err, 'error');
+  } finally {
+    if (uploadBtn) { uploadBtn.disabled = false; uploadBtn.textContent = 'Upload & Preview'; }
+  }
+}
+
+async function startActiveBatchRun() {
+  if (!_activeResearchBatchId) return;
+  const startBtn = document.getElementById('btn-start-batch-run');
+  if (startBtn) { startBtn.disabled = true; startBtn.textContent = 'Starting...'; }
+
+  try {
+    const res = await api('/api/research/batch/' + encodeURIComponent(_activeResearchBatchId) + '/run', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ resume: false })
+    });
+    if (res && res.success) {
+      showToast('Research pipeline started in background.', 'success');
+      loadResearchBatchDetails(_activeResearchBatchId);
+    } else {
+      showToast(failMsg(res, 'Could not start batch research'), 'error');
+    }
+  } catch (err) {
+    showToast('Start error: ' + err, 'error');
+  } finally {
+    if (startBtn) { startBtn.disabled = false; startBtn.textContent = 'Start Research Run'; }
+  }
+}
+
+async function resumeActiveBatch() {
+  if (!_activeResearchBatchId) return;
+  const resumeBtn = document.getElementById('btn-research-resume');
+  if (resumeBtn) { resumeBtn.disabled = true; resumeBtn.textContent = 'Resuming...'; }
+
+  try {
+    const res = await api('/api/research/batch/' + encodeURIComponent(_activeResearchBatchId) + '/run?resume=true', {
+      method: 'POST',
+    });
+    if (res && res.success) {
+      showToast('Resuming incomplete domain research...', 'success');
+      loadResearchBatchDetails(_activeResearchBatchId);
+    } else {
+      showToast(failMsg(res, 'Could not resume batch'), 'error');
+    }
+  } catch (err) {
+    showToast('Resume error: ' + err, 'error');
+  } finally {
+    if (resumeBtn) { resumeBtn.disabled = false; resumeBtn.innerHTML = '<svg class="icon" aria-hidden="true"><use href="#i-arrow"/></svg> Resume Incomplete'; }
+  }
+}
+
+function filterResearchTable() {
+  renderResearchTable();
+}
+
+function renderResearchTable() {
+  const tbody = document.getElementById('research-results-tbody');
+  const countEl = document.getElementById('research-table-count');
+  if (!tbody || !_researchDetails) return;
+
+  const domains = _researchDetails.domains || [];
+  const q = (document.getElementById('research-search-input')?.value || '').trim().toLowerCase();
+  const filterStat = document.getElementById('research-filter-status')?.value || 'all';
+
+  // Build row lookup for company hints
+  const rows = _researchDetails.rows || [];
+  const hintsByDomain = {};
+  for (const r of rows) {
+    if (r.domain && r.company_name_hint) {
+      if (!hintsByDomain[r.domain]) hintsByDomain[r.domain] = [];
+      if (!hintsByDomain[r.domain].includes(r.company_name_hint)) {
+        hintsByDomain[r.domain].push(r.company_name_hint);
+      }
+    }
+  }
+
+  const filtered = domains.filter(d => {
+    // Status filter
+    if (filterStat === 'verified' && d.website?.verification_status !== 'verified') return false;
+    if (filterStat === 'completed' && d.status !== 'completed') return false;
+    if (filterStat === 'has_dm' && (!d.people || d.people.length === 0)) return false;
+    if (filterStat === 'entity_match' && d.entity_check !== 'match') return false;
+    if (filterStat === 'entity_nomatch' && d.entity_check !== 'no_match') return false;
+    if (filterStat === 'pending_failed' && !['pending', 'running', 'failed'].includes(d.status)) return false;
+
+    // Search query
+    if (q) {
+      const domName = (d.domain || '').toLowerCase();
+      const hints = (hintsByDomain[d.domain] || []).join(' ').toLowerCase();
+      const ov = (d.narrative?.overview || '').toLowerCase();
+      const services = (d.narrative?.services || []).join(' ').toLowerCase();
+      const people = (d.people || []).map(p => (p.full_name || '') + ' ' + (p.title || '')).join(' ').toLowerCase();
+      const combined = `${domName} ${hints} ${ov} ${services} ${people}`;
+      if (!combined.includes(q)) return false;
+    }
+    return true;
+  });
+
+  if (countEl) {
+    countEl.textContent = `Showing ${filtered.length} of ${domains.length} domains`;
+  }
+
+  if (filtered.length === 0) {
+    tbody.innerHTML = '<tr><td colspan="8" style="text-align:center;padding:24px;color:var(--text-3);">' +
+      (domains.length === 0 ? 'No domains found in this batch.' : 'No domains match the selected search or filter criteria.') +
+      '</td></tr>';
+    return;
+  }
+
+  tbody.innerHTML = filtered.map((d, idx) => {
+    const hints = hintsByDomain[d.domain] || [];
+    const hintStr = hints.length > 0 ? hints.join(', ') : '—';
+
+    // Domain & Website Link
+    let webHtml = '';
+    const webStat = d.website?.verification_status || 'pending';
+    const finalUrl = d.website?.final_url || (d.domain ? `https://${d.domain}` : '#');
+    if (webStat === 'verified') {
+      webHtml = `<div><a href="${escHtml(finalUrl)}" target="_blank" rel="noopener noreferrer" style="color:var(--accent);text-decoration:none;font-weight:500;">${escHtml(d.domain)}</a></div>` +
+        `<span class="badge t-good" style="font-size:10px;margin-top:2px;">Verified Website</span>`;
+    } else if (webStat === 'unavailable') {
+      webHtml = `<div>${escHtml(d.domain)}</div><span class="badge t-bad" style="font-size:10px;margin-top:2px;">Unreachable</span>`;
+    } else {
+      webHtml = `<div>${escHtml(d.domain)}</div><span class="badge t-waiting" style="font-size:10px;margin-top:2px;">Pending</span>`;
+    }
+
+    // Entity Check Badge
+    let entityBadge = '';
+    if (d.entity_check === 'match') {
+      entityBadge = `<span class="badge t-good" title="${escHtml(d.entity_check_evidence || 'Entity confirmed')}">Verified Match</span>`;
+    } else if (d.entity_check === 'no_match') {
+      entityBadge = `<span class="badge t-bad" title="${escHtml(d.entity_check_evidence || 'Company name not confirmed on website')}">No Match</span>`;
+    } else {
+      entityBadge = `<span class="badge t-idle">No Hint</span>`;
+    }
+
+    // Overview
+    const rawOv = d.narrative?.overview || '';
+    const ovClean = rawOv ? (rawOv.length > 130 ? escHtml(rawOv.slice(0, 127)) + '...' : escHtml(rawOv)) : '<span class="muted">No overview</span>';
+
+    // Core Services Chips
+    const services = d.narrative?.services || [];
+    let servicesHtml = '';
+    if (services.length > 0) {
+      servicesHtml = services.slice(0, 3).map(s => `<span class="research-service-chip">${escHtml(s)}</span>`).join('');
+      if (services.length > 3) {
+        servicesHtml += `<span class="research-service-chip" style="color:var(--accent);">+${services.length - 3} more</span>`;
+      }
+    } else {
+      servicesHtml = '<span class="muted" style="font-size:11px;">None identified</span>';
+    }
+
+    // Decision Makers
+    const people = d.people || [];
+    let dmHtml = '';
+    if (people.length > 0) {
+      dmHtml = people.slice(0, 2).map(p => {
+        return `<div class="research-person-card">` +
+          `<strong>${escHtml(p.full_name || 'Officer')}</strong> &bull; <span class="muted">${escHtml(p.title || 'Executive')}</span>` +
+          `</div>`;
+      }).join('');
+      if (people.length > 2) {
+        dmHtml += `<div class="muted" style="font-size:11px;margin-top:2px;">+${people.length - 2} more decision maker(s)</div>`;
+      }
+    } else if (d.status === 'completed') {
+      dmHtml = '<span class="muted" style="font-size:11px;">No verified officers</span>';
+    } else {
+      dmHtml = '<span class="muted" style="font-size:11px;">Pending research</span>';
+    }
+
+    return `<tr>
+      <td style="color:var(--text-3);font-size:11px;">${idx + 1}</td>
+      <td>
+        <div style="font-weight:600;color:var(--text);">${escHtml(hintStr)}</div>
+        <div class="muted" style="font-size:11px;">Rep: ${escHtml(d.representative_email_masked || '—')}</div>
+      </td>
+      <td>${webHtml}</td>
+      <td>${entityBadge}</td>
+      <td style="font-size:12px;line-height:1.4;">${ovClean}</td>
+      <td>${servicesHtml}</td>
+      <td>${dmHtml}</td>
+      <td style="text-align:right;">
+        <button class="btn btn-secondary btn-sm" onclick="openResearchDetailModal(${jsq(d.domain)})" style="padding:2px 8px;font-size:11px;">
+          View
+        </button>
+      </td>
+    </tr>`;
+  }).join('');
+}
+
+function openResearchDetailModal(domainName) {
+  const modal = document.getElementById('research-detail-modal');
+  const titleEl = document.getElementById('res-modal-company-title');
+  const domainSub = document.getElementById('res-modal-domain-sub');
+  const bodyEl = document.getElementById('res-modal-body');
+  if (!modal || !_researchDetails) return;
+
+  const dom = (_researchDetails.domains || []).find(d => d.domain === domainName);
+  if (!dom) return;
+
+  // Associated rows
+  const assocRows = (_researchDetails.rows || []).filter(r => r.domain === domainName);
+  const companyHint = assocRows.find(r => r.company_name_hint)?.company_name_hint || dom.website?.title || dom.domain;
+
+  if (titleEl) titleEl.textContent = companyHint;
+  if (domainSub) {
+    const webUrl = dom.website?.final_url || `https://${dom.domain}`;
+    domainSub.innerHTML = `<a href="${escHtml(webUrl)}" target="_blank" rel="noopener noreferrer" style="color:var(--accent);text-decoration:none;">${escHtml(webUrl)}</a> &bull; Status: <span class="badge ${dom.status === 'completed' ? 't-good' : 't-waiting'}">${escHtml(dom.status)}</span>`;
+  }
+
+  // Build modal body
+  let bodyHtml = '';
+
+  // Entity Check section
+  let ecBadge = dom.entity_check === 'match' ? '<span class="badge t-good">Verified Match</span>' : dom.entity_check === 'no_match' ? '<span class="badge t-bad">No Match</span>' : '<span class="badge t-idle">No Hint</span>';
+  bodyHtml += `<div class="card" style="margin-bottom:12px;padding:12px;background:var(--surface-2);">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;">
+      <strong style="font-size:13px;">Entity Cross-Check</strong>
+      ${ecBadge}
+    </div>
+    <div style="font-size:12px;color:var(--text-2);">
+      ${dom.entity_check_evidence ? '<strong>Evidence:</strong> ' + escHtml(dom.entity_check_evidence) : (dom.entity_check === 'match' ? 'Company name confirmed against website content.' : 'Company name hint not confirmed on website.')}
+    </div>
+  </div>`;
+
+  // Narrative: Overview, Services, Vision, Mission
+  bodyHtml += `<div class="card" style="margin-bottom:12px;padding:12px;">
+    <h4 style="margin:0 0 8px 0;font-size:13px;font-weight:600;">Corporate Narrative</h4>
+    <div style="margin-bottom:8px;">
+      <div class="muted" style="font-size:11px;font-weight:600;text-transform:uppercase;">Overview</div>
+      <div style="font-size:12px;line-height:1.5;margin-top:2px;">${escHtml(dom.narrative?.overview || 'Not found')}</div>
+    </div>
+    ${dom.narrative?.services && dom.narrative.services.length > 0 ? `
+      <div style="margin-bottom:8px;">
+        <div class="muted" style="font-size:11px;font-weight:600;text-transform:uppercase;margin-bottom:4px;">Products &amp; Core Services</div>
+        <div style="display:flex;flex-wrap:wrap;gap:4px;">
+          ${dom.narrative.services.map(s => `<span class="research-service-chip">${escHtml(s)}</span>`).join('')}
+        </div>
+      </div>
+    ` : ''}
+    ${dom.narrative?.vision ? `
+      <div style="margin-bottom:6px;">
+        <div class="muted" style="font-size:11px;font-weight:600;text-transform:uppercase;">Vision</div>
+        <div style="font-size:12px;line-height:1.4;">${escHtml(dom.narrative.vision)}</div>
+      </div>
+    ` : ''}
+    ${dom.narrative?.mission ? `
+      <div style="margin-bottom:6px;">
+        <div class="muted" style="font-size:11px;font-weight:600;text-transform:uppercase;">Mission</div>
+        <div style="font-size:12px;line-height:1.4;">${escHtml(dom.narrative.mission)}</div>
+      </div>
+    ` : ''}
+  </div>`;
+
+  // Decision Makers & Leadership
+  const people = dom.people || [];
+  bodyHtml += `<div class="card" style="margin-bottom:12px;padding:12px;">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
+      <h4 style="margin:0;font-size:13px;font-weight:600;">Identified Leadership &amp; Decision Makers</h4>
+      <span class="badge t-note" style="font-size:10px;">${people.length} Verified</span>
+    </div>
+    ${people.length === 0 ? '<div class="muted" style="font-size:12px;">No executive leadership discovered for this domain.</div>' : `
+      <div style="display:flex;flex-direction:column;gap:8px;">
+        ${people.map(p => `
+          <div style="background:var(--surface-2);border:1px solid var(--line);border-radius:6px;padding:8px 12px;">
+            <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:4px;">
+              <div>
+                <strong>${escHtml(p.full_name || 'Executive')}</strong>
+                <span class="muted" style="font-size:12px;margin-left:6px;">${escHtml(p.title || 'Officer')}</span>
+              </div>
+              <span class="badge t-good" style="font-size:10px;">${escHtml(p.role_category || 'leadership')}</span>
+            </div>
+            ${p.evidence_text ? `<div style="font-size:11px;color:var(--text-2);margin-bottom:4px;"><em>&ldquo;${escHtml(p.evidence_text)}&rdquo;</em></div>` : ''}
+            ${p.source_url ? `<div style="font-size:11px;"><a href="${escHtml(p.source_url)}" target="_blank" rel="noopener noreferrer" style="color:var(--accent);text-decoration:none;">Source: ${escHtml(p.source_url)}</a></div>` : ''}
+          </div>
+        `).join('')}
+      </div>
+    `}
+  </div>`;
+
+  // Associated Contacts (Masked)
+  bodyHtml += `<div class="card" style="padding:12px;">
+    <h4 style="margin:0 0 8px 0;font-size:13px;font-weight:600;">Associated Contacts (${assocRows.length})</h4>
+    <div class="table-card" style="max-height:160px;overflow-y:auto;">
+      <table class="table" style="font-size:11px;">
+        <thead>
+          <tr>
+            <th>Row</th>
+            <th>Name</th>
+            <th>Email (Masked)</th>
+            <th>Phone (Masked)</th>
+            <th>Status</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${assocRows.map(r => `
+            <tr>
+              <td>${escHtml(r.row_number)}</td>
+              <td>${escHtml(r.name || '—')}</td>
+              <td><code>${escHtml(r.email_masked || '—')}</code></td>
+              <td><code>${escHtml(r.phone_masked || '—')}</code></td>
+              <td><span class="badge ${r.row_status === 'valid' ? 't-good' : 't-bad'}">${escHtml(r.row_status)}</span></td>
+            </tr>
+          `).join('')}
+        </tbody>
+      </table>
+    </div>
+  </div>`;
+
+  if (bodyEl) bodyEl.innerHTML = bodyHtml;
+  modal.style.display = 'flex';
+}
+
+function closeResearchDetailModal() {
+  const modal = document.getElementById('research-detail-modal');
+  if (modal) modal.style.display = 'none';
+}
+
+async function exportResearchBatch(format) {
+  if (!_activeResearchBatchId) {
+    showToast('No active batch selected to export', 'error');
+    return;
+  }
+  try {
+    showToast('Preparing ' + format.toUpperCase() + ' export...', 'info');
+    const path = `/api/research/batch/${encodeURIComponent(_activeResearchBatchId)}/export?format=${encodeURIComponent(format)}`;
+    const response = await authFetch(path);
+    if (!response.ok) {
+      throw new Error(`Export failed (HTTP ${response.status})`);
+    }
+    const blob = await response.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = format === 'html' ? `research_report_${_activeResearchBatchId}.html` : `contacts_results_${_activeResearchBatchId}.csv`;
+    document.body.appendChild(a);
+    a.click();
+    setTimeout(() => {
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+    }, 200);
+    showToast('Export downloaded successfully!', 'success');
+  } catch (err) {
+    console.error('Export failed:', err);
+    showToast('Export error: ' + err.message, 'error');
   }
 }

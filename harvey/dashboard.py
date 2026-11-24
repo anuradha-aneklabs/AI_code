@@ -5,6 +5,7 @@ import ipaddress
 import json
 import logging
 import os
+import re
 import shutil
 import signal
 import stat
@@ -110,10 +111,14 @@ async def query_db(sql: str, params: tuple = ()) -> list[dict]:
     Never raises: a missing DB file, missing table, or malformed schema
     returns [] so no dashboard route can 500 on an empty install.
     """
-    if not DB_PATH.exists():
+    try:
+        active_path = Path(_state().db_path)
+    except Exception:
+        active_path = Path(get_db_path())
+    if not active_path.exists():
         return []
     try:
-        async with aiosqlite.connect(str(DB_PATH)) as db:
+        async with aiosqlite.connect(str(active_path)) as db:
             db.row_factory = aiosqlite.Row
             async with db.execute(sql, params) as cursor:
                 rows = await cursor.fetchall()
@@ -667,6 +672,23 @@ async def api_create_research_batch(request: Request):
         return JSONResponse({"success": False, "error": str(e)}, status_code=500)
 
 
+# In-memory tracking for running background research tasks
+_running_research_batches: dict[str, asyncio.Task] = {}
+
+
+@app.get("/api/research/batches")
+async def api_list_research_batches(request: Request):
+    """List recent research batches."""
+    try:
+        state = _state()
+        await state.init_db()
+        batches = await state.list_import_batches(limit=50)
+        return {"success": True, "batches": batches}
+    except Exception as e:
+        logger.exception("Failed to list research batches")
+        return JSONResponse({"success": False, "error": str(e)}, status_code=500)
+
+
 @app.get("/api/research/batch/{batch_id}")
 async def api_get_research_batch_status(batch_id: str):
     """Retrieve batch status and per-domain research progress."""
@@ -677,15 +699,242 @@ async def api_get_research_batch_status(batch_id: str):
         if not batch:
             return JSONResponse({"success": False, "error": f"Batch '{batch_id}' not found"}, status_code=404)
         domains = await state.get_import_domains(batch_id)
-        return {"success": True, "batch": batch, "domains": domains}
+        is_running = batch_id in _running_research_batches and not _running_research_batches[batch_id].done()
+        return {"success": True, "batch": batch, "domains": domains, "is_running": is_running}
     except Exception as e:
         logger.exception("Failed to get batch %s", batch_id)
         return JSONResponse({"success": False, "error": str(e)}, status_code=500)
 
 
+@app.post("/api/research/batch/{batch_id}/run")
+async def api_run_research_batch(batch_id: str, request: Request):
+    """Start or resume running batch research in the background."""
+    try:
+        from harvey.batch_research import run_batch
+        state = _state()
+        await state.init_db()
+        batch = await state.get_import_batch(batch_id)
+        if not batch:
+            return JSONResponse({"success": False, "error": f"Batch '{batch_id}' not found"}, status_code=404)
+
+        resume = False
+        max_domains = None
+        try:
+            body = await request.json()
+            if isinstance(body, dict):
+                resume = bool(body.get("resume", False))
+                if "max_domains" in body:
+                    max_domains = int(body["max_domains"])
+        except Exception:
+            pass
+
+        qp = request.query_params
+        if "resume" in qp:
+            resume = qp["resume"].lower() in ("true", "1", "yes")
+        if "max_domains" in qp:
+            try:
+                max_domains = int(qp["max_domains"])
+            except Exception:
+                pass
+
+        existing_task = _running_research_batches.get(batch_id)
+        if existing_task and not existing_task.done():
+            return {"success": True, "message": "Batch research is already running", "status": "running", "batch_id": batch_id}
+
+        async def _run_bg():
+            try:
+                await run_batch(batch_id, state=state, resume=resume, max_domains=max_domains)
+            except Exception as ex:
+                logger.exception("Background run_batch failed for %s: %s", batch_id, ex)
+            finally:
+                _running_research_batches.pop(batch_id, None)
+
+        task = asyncio.create_task(_run_bg())
+        _running_research_batches[batch_id] = task
+
+        return {"success": True, "message": "Batch research started", "status": "running", "batch_id": batch_id}
+    except Exception as e:
+        logger.exception("Failed to start batch research for %s", batch_id)
+        return JSONResponse({"success": False, "error": str(e)}, status_code=500)
+
+
+@app.get("/api/research/batch/{batch_id}/details")
+async def api_get_research_batch_details(batch_id: str):
+    """Retrieve full batch details: metrics, rows with masked PII, domains, narratives, and people."""
+    try:
+        from harvey.batch_research import mask_email, mask_phone
+        state = _state()
+        await state.init_db()
+        batch = await state.get_import_batch(batch_id)
+        if not batch:
+            return JSONResponse({"success": False, "error": f"Batch '{batch_id}' not found"}, status_code=404)
+
+        domains = await state.get_import_domains(batch_id)
+        rows = await state.get_import_rows(batch_id)
+
+        run_ids = [d["run_id"] for d in domains if d.get("run_id")]
+
+        websites_by_run: dict[str, dict[str, Any]] = {}
+        findings_by_run: dict[str, list[dict[str, Any]]] = {}
+        people_by_run: dict[str, list[dict[str, Any]]] = {}
+
+        if run_ids:
+            async with state._connect() as db:
+                db.row_factory = aiosqlite.Row
+                ph = ",".join("?" for _ in run_ids)
+                async with db.execute(f"SELECT * FROM company_websites WHERE run_id IN ({ph})", run_ids) as cur:
+                    for r in await cur.fetchall():
+                        websites_by_run[r["run_id"]] = dict(r)
+                async with db.execute(f"SELECT * FROM research_findings WHERE run_id IN ({ph}) ORDER BY created_at ASC", run_ids) as cur:
+                    for r in await cur.fetchall():
+                        findings_by_run.setdefault(r["run_id"], []).append(dict(r))
+                async with db.execute(f"SELECT * FROM research_people WHERE run_id IN ({ph}) ORDER BY created_at ASC", run_ids) as cur:
+                    for r in await cur.fetchall():
+                        people_by_run.setdefault(r["run_id"], []).append(dict(r))
+
+        enriched_domains = []
+        verified_websites_count = 0
+        total_people_count = 0
+
+        for d in domains:
+            run_id = d.get("run_id", "")
+            site = websites_by_run.get(run_id, {})
+            findings = findings_by_run.get(run_id, [])
+            people = [p for p in people_by_run.get(run_id, []) if not p.get("excluded_reason")]
+
+            web_status = site.get("verification_status", "pending")
+            if web_status == "verified":
+                verified_websites_count += 1
+
+            active_people = [p for p in people if p.get("verification_status") != "unavailable"]
+            total_people_count += len(active_people)
+
+            overview_text = ""
+            overview_status = ""
+            vision_text = ""
+            mission_text = ""
+            services_list = []
+
+            for f in findings:
+                ftype = f.get("finding_type", "")
+                val = (f.get("value_text") or "").strip()
+                fstat = f.get("verification_status") or f.get("status") or ""
+                if ftype == "overview" and not overview_text:
+                    overview_text = val
+                    overview_status = fstat
+                elif ftype == "vision" and not vision_text:
+                    vision_text = val
+                elif ftype == "mission" and not mission_text:
+                    mission_text = val
+                elif ftype in ("product_service", "services"):
+                    if val and val != "unavailable":
+                        if val.startswith("["):
+                            try:
+                                parsed = json.loads(val)
+                                if isinstance(parsed, list):
+                                    services_list.extend([str(item).strip() for item in parsed if str(item).strip()])
+                                    continue
+                            except Exception:
+                                pass
+                        services_list.append(val)
+
+            clean_services = []
+            for s in services_list:
+                s_clean = re.sub(r"\s*\[[^\]]+\]$", "", s).strip()
+                if s_clean and s_clean not in clean_services:
+                    clean_services.append(s_clean)
+
+            stage_sum = {}
+            if d.get("stage_summary_json"):
+                try:
+                    stage_sum = json.loads(d["stage_summary_json"])
+                except Exception:
+                    pass
+
+            enriched_domains.append({
+                "id": d.get("id"),
+                "domain": d.get("domain"),
+                "status": d.get("status"),
+                "run_id": run_id,
+                "representative_email_masked": mask_email(d.get("representative_email", "")),
+                "entity_check": d.get("entity_check", "no_hint"),
+                "entity_check_evidence": d.get("entity_check_evidence", ""),
+                "error": d.get("error", ""),
+                "started_at": d.get("started_at"),
+                "finished_at": d.get("finished_at"),
+                "stage_summary": stage_sum,
+                "website": {
+                    "final_url": site.get("final_url", ""),
+                    "verification_status": web_status,
+                    "title": site.get("title", ""),
+                    "description": site.get("meta_description", "") or site.get("description", ""),
+                },
+                "narrative": {
+                    "overview": overview_text,
+                    "overview_status": overview_status,
+                    "vision": vision_text,
+                    "mission": mission_text,
+                    "services": clean_services[:8],
+                },
+                "people": [
+                    {
+                        "full_name": p.get("full_name"),
+                        "title": p.get("title"),
+                        "role_category": p.get("role_category"),
+                        "verification_status": p.get("verification_status"),
+                        "evidence_text": p.get("evidence_text", ""),
+                        "source_url": p.get("source_url", ""),
+                    }
+                    for p in people
+                ],
+            })
+
+        masked_rows = []
+        for r in rows:
+            masked_rows.append({
+                "id": r.get("id"),
+                "row_number": r.get("row_number"),
+                "name": r.get("raw_name", ""),
+                "company_name_hint": r.get("company_name_hint", ""),
+                "email_masked": mask_email(r.get("raw_email", "")),
+                "phone_masked": mask_phone(r.get("raw_phone", "")),
+                "domain": r.get("domain", ""),
+                "row_status": r.get("row_status", ""),
+                "error": r.get("error", ""),
+            })
+
+        valid_contacts = sum(1 for r in rows if r.get("row_status") in ("valid", "duplicate_domain"))
+        companies_researched = sum(1 for d in domains if d.get("status") == "completed")
+        pending_failed = sum(1 for d in domains if d.get("status") in ("pending", "running", "failed"))
+
+        metrics = {
+            "total_contacts": len(rows),
+            "valid_contacts": valid_contacts,
+            "unique_domains": len(domains),
+            "websites_verified": verified_websites_count,
+            "companies_researched": companies_researched,
+            "decision_makers_found": total_people_count,
+            "pending_failed": pending_failed,
+        }
+
+        is_running = batch_id in _running_research_batches and not _running_research_batches[batch_id].done()
+
+        return {
+            "success": True,
+            "batch": batch,
+            "is_running": is_running,
+            "metrics": metrics,
+            "domains": enriched_domains,
+            "rows": masked_rows,
+        }
+    except Exception as e:
+        logger.exception("Failed to get batch details for %s", batch_id)
+        return JSONResponse({"success": False, "error": str(e)}, status_code=500)
+
+
 @app.get("/api/research/batch/{batch_id}/export")
 async def api_export_research_batch(batch_id: str, request: Request):
-    """Export and download research batch results as CSV."""
+    """Export and download research batch results as CSV or self-contained HTML."""
     try:
         from starlette.responses import FileResponse
         from harvey.batch_research import export_batch_results
@@ -695,8 +944,21 @@ async def api_export_research_batch(batch_id: str, request: Request):
         if not batch:
             return JSONResponse({"success": False, "error": f"Batch '{batch_id}' not found"}, status_code=404)
 
-        export_paths = await export_batch_results(batch_id, state=state)
-        target = request.query_params.get("type", "contacts")
+        export_format = request.query_params.get("format", "").lower()
+        target = request.query_params.get("type", "contacts").lower()
+
+        if export_format == "html" or target == "html":
+            from scripts.make_demo_report import generate_html_report
+            db_file = str(state.db_path)
+            html_path = generate_html_report(db_path=db_file, batch_id=batch_id)
+            return FileResponse(
+                path=html_path,
+                filename=f"research_report_{batch_id}.html",
+                media_type="text/html",
+            )
+
+        unmask = request.query_params.get("unmask", "").lower() in ("true", "1", "yes")
+        export_paths = await export_batch_results(batch_id, state=state, unmask=unmask)
         if target == "decision_makers":
             file_to_send = export_paths["decision_makers"]
             media_name = f"decision_makers_{batch_id}.csv"
@@ -1292,7 +1554,9 @@ async def get_prospects():
 
 def _state():
     from harvey.state import StateManager
-    return StateManager(db_path=str(DB_PATH))
+    from harvey.paths import get_db_path
+    current_db = get_db_path()
+    return StateManager(db_path=str(current_db))
 
 
 # What a reviewer needs next to a draft to check its claims against the facts.
@@ -2941,10 +3205,23 @@ async def run_discovery_search(request: Request):
         confirm = bool(body.get("confirm", False))
 
         config = load_config()
+        if industry.lower() in ("dentist", "dentists") or (not industry and any("dentist" in str(ind).lower() for ind in config.icp.industries)):
+            return {
+                "success": False,
+                "status": "template_criteria_refused",
+                "message": (
+                    "Refusing live discovery with empty or template-default criteria ('dentist'). "
+                    "Please specify a target industry (e.g. 'SaaS') and location (e.g. 'Indore, Madhya Pradesh, India')."
+                ),
+                "leads": [],
+                "count": 0,
+                "discovered_count": 0,
+            }
+
         industries = [industry] if industry else None
         cities = [location] if location else None
         queries = build_queries(config, cities=cities, industries=industries,
-                                depth=10, limit=limit)
+                                depth=30, limit=limit, expand_queries=True)
         if not queries:
             return {
                 "success": False,
@@ -3013,7 +3290,10 @@ async def run_discovery_search(request: Request):
                 async with db.execute(
                     """
                     SELECT c.id, c.name, c.domain, c.website, c.industry,
-                           c.location, c.source, c.source_url
+                           c.location, c.source, c.source_url,
+                           COALESCE(c.product_class, '') as product_class,
+                           COALESCE(c.product_class_evidence, '') as product_class_evidence,
+                           COALESCE(c.location_status, 'location_unverified') as location_status
                     FROM companies c
                     JOIN observations o ON o.company_id = c.id
                     WHERE o.run_id = ?
@@ -3033,6 +3313,9 @@ async def run_discovery_search(request: Request):
                             "location": row["location"],
                             "provider": (row["source"] or "").replace("discover:", ""),
                             "source_url": row["source_url"] or "",
+                            "product_class": row["product_class"],
+                            "product_class_evidence": row["product_class_evidence"],
+                            "location_status": row["location_status"],
                             "is_sample": 0,
                         })
 
@@ -3048,6 +3331,7 @@ async def run_discovery_search(request: Request):
             "discovered_count": len(leads),
             "count": len(leads),
             "leads": leads,
+            "results": report.results,
             "errors": report.errors,
             "stopped": report.stopped or None,
         }
@@ -4050,6 +4334,11 @@ async def set_signals_status(request: Request):
         # Seed first: a confirm that arrives before anything has loaded the
         # catalog would otherwise report success while changing nothing.
         await seed_signal_catalog(state)
+
+        if codes == ["free"] or codes == ["FREE"] or body.get("free_only"):
+            all_signals = await state.get_signal_codes()
+            codes = [c["code"] for c in all_signals
+                     if (c.get("cost_note") or "").lower().startswith(("free", "included"))]
 
         changed, unknown = 0, []
         for code in codes:
@@ -5186,7 +5475,7 @@ async def test_integration_connection(request: Request):
         try:
             from harvey.collectors.discover import get_nominatim_user_agent, wait_for_nominatim_rate_limit
             await wait_for_nominatim_rate_limit()
-            async with httpx.AsyncClient(timeout=8.0) as client:
+            async with httpx.AsyncClient(timeout=15.0) as client:
                 r = await client.get(
                     "https://nominatim.openstreetmap.org/status.php",
                     headers={"User-Agent": get_nominatim_user_agent()}

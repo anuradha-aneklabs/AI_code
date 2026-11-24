@@ -1170,6 +1170,20 @@ class ProfileCollector:
         except Exception as e:
             logger.debug("Failed location evidence check for %s: %s", domain, e)
 
+        # Software Product vs Services Classification (on-page evidence)
+        try:
+            from harvey.software_classifier import classify_software_business
+            p_class, p_ev = classify_software_business(
+                home,
+                title=self.site_names.get(company_id, ""),
+                domain=domain,
+            )
+            if p_class != "other":
+                await self.state.update_company_product_class(company_id, p_class, p_ev)
+                add("SOFTWARE_BUSINESS_MODEL", text=p_class, url=site)
+        except Exception as e:
+            logger.debug("Failed software business model classification for %s: %s", domain, e)
+
         # Ads (they are spending TODAY — the strongest budget signal here)
         has_gads = bool(self._any(home, GOOGLE_ADS))
         has_mads = bool(self._any(home, META_PIXEL))

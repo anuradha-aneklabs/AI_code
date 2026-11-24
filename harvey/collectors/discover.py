@@ -2286,6 +2286,21 @@ async def run_discovery(
                     biz.result_class = res_class
                     biz.result_class_reason = res_reason
 
+                    from harvey.software_classifier import classify_software_business
+                    if res_class == "company_homepage":
+                        prod_class, prod_ev = classify_software_business(
+                            biz.raw_title or biz.name,
+                            title=biz.name,
+                            domain=biz.domain,
+                            result_class=res_class,
+                        )
+                    else:
+                        prod_class = "not_applicable"
+                        prod_ev = f"Not applicable for {res_class}"
+
+                    biz.product_class = prod_class
+                    biz.product_class_evidence = prod_ev
+
                     # Record every search result in state (delete nothing)
                     try:
                         await state.save_discovery_result(
@@ -2297,6 +2312,8 @@ async def run_discovery(
                             result_class=res_class,
                             reason=res_reason,
                             location_status="location_unverified",
+                            product_class=prod_class,
+                            product_class_evidence=prod_ev,
                         )
                     except Exception as e:
                         logger.debug("Failed to record discovery result row: %s", e)
@@ -2309,6 +2326,8 @@ async def run_discovery(
                         "result_class": res_class,
                         "reason": res_reason,
                         "location_status": "location_unverified",
+                        "product_class": prod_class,
+                        "product_class_evidence": prod_ev,
                     })
 
                     # Only company_homepage results become company records and go to the profiler
@@ -2424,6 +2443,9 @@ async def _upsert(state, biz: Business, query: DiscoveryQuery) -> tuple[str, boo
         if existing is None and external:
             existing = await state.get_company_by_external_id(external)
     if existing:
+        prod_cls = getattr(biz, "product_class", "")
+        if prod_cls and not existing.product_class:
+            await state.update_company_product_class(existing.id, prod_cls, getattr(biz, "product_class_evidence", ""))
         return existing.id, False
 
     company = Company(
@@ -2438,6 +2460,8 @@ async def _upsert(state, biz: Business, query: DiscoveryQuery) -> tuple[str, boo
         external_id=biz.external_id,
         result_class=getattr(biz, "result_class", "company_homepage") or "company_homepage",
         location_status="location_unverified",
+        product_class=getattr(biz, "product_class", "") or "",
+        product_class_evidence=getattr(biz, "product_class_evidence", "") or "",
     )
     return await state.add_company(company), True
 

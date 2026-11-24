@@ -334,7 +334,7 @@ async def create_batch_from_file(
                 "normalized_email": val_res.normalized_email,
                 "domain": domain,
                 "row_status": "duplicate_domain",
-                "error": f"Shares research run with {seen_domains[domain]}",
+                "error": f"Shares research run with {mask_email(seen_domains[domain])}",
             })
         else:
             seen_domains[domain] = val_res.normalized_email
@@ -528,7 +528,7 @@ async def run_batch(
             entity_check_evidence = ""
             if domain_hints:
                 for hint in domain_hints:
-                    ec_stat, ec_ev = check_entity_match(hint, pages=pages, website=website)
+                    ec_stat, ec_ev = check_entity_match(hint, pages=pages, website=website, domain=domain)
                     if ec_stat == "match":
                         entity_check = "match"
                         entity_check_evidence = ec_ev
@@ -628,6 +628,7 @@ async def export_batch_results(
     batch_id: str,
     state: StateManager,
     export_dir: str | Path = "data/exports",
+    unmask: bool = False,
 ) -> dict[str, str]:
     """Export batch results to CSV files in data/exports/.
     
@@ -909,8 +910,8 @@ async def export_batch_results(
             out_row = {
                 "row_number": r["row_number"],
                 "name": r["raw_name"],
-                "email": r["raw_email"],
-                "phone": r["raw_phone"],
+                "email": r["raw_email"] if unmask else mask_email(r["raw_email"]),
+                "phone": r["raw_phone"] if unmask else mask_phone(r["raw_phone"]),
                 "row_status": r_stat,
                 "domain": dom,
                 "website_status": web_status,

@@ -965,6 +965,13 @@ MIGRATIONS: list[str] = [
     ALTER TABLE import_domains ADD COLUMN entity_check TEXT DEFAULT '';
     ALTER TABLE import_domains ADD COLUMN entity_check_evidence TEXT DEFAULT '';
     """,
+    # ── v32: software product vs services classification on companies and discovery_results ──
+    """
+    ALTER TABLE companies ADD COLUMN product_class TEXT DEFAULT '';
+    ALTER TABLE companies ADD COLUMN product_class_evidence TEXT DEFAULT '';
+    ALTER TABLE discovery_results ADD COLUMN product_class TEXT DEFAULT '';
+    ALTER TABLE discovery_results ADD COLUMN product_class_evidence TEXT DEFAULT '';
+    """,
 ]
 
 CRM_PIPELINE_STAGES: list[str] = [
@@ -1026,8 +1033,24 @@ class StateManager:
                 except Exception:
                     self.db_path = str(db_path)
         else:
-            if db_path:
-                self.db_path = str(db_path)
+            real_default = (_REAL_PROJECT_ROOT / "data" / "harvey.db").resolve()
+            given = Path(db_path).resolve() if db_path else real_default
+            is_prod_cli = os.environ.get("HARVEY_ALLOW_REAL_DB_WRITE") == "1"
+            is_guarded = bool(
+                os.environ.get("PYTEST_CURRENT_TEST")
+                or os.environ.get("HARVEY_GUARD_REAL_DB") == "1"
+                or not is_prod_cli
+            )
+            if given == real_default and is_guarded and real_default.exists():
+                import tempfile
+                import shutil
+                tmp_dir = Path(tempfile.gettempdir())
+                guarded_copy = tmp_dir / "harvey_guarded_test.db"
+                if not guarded_copy.exists() or guarded_copy.stat().st_size != real_default.stat().st_size:
+                    shutil.copy2(str(real_default), str(guarded_copy))
+                self.db_path = str(guarded_copy)
+            elif given:
+                self.db_path = str(given)
             else:
                 self.db_path = str(get_db_path())
 
@@ -5588,18 +5611,30 @@ class StateManager:
         reason: str,
         location_status: str = "location_unverified",
         location_evidence: str = "",
+        product_class: str = "",
+        product_class_evidence: str = "",
     ) -> str:
         """Persist a raw discovery search result with its classification and reason."""
         res_id = _new_id()
         async with self._connect() as db:
-            await db.execute(
-                """
-                INSERT INTO discovery_results
-                (id, run_id, query, title, url, domain, result_class, reason, location_status, location_evidence)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (res_id, run_id, query, title, url, domain, result_class, reason, location_status, location_evidence),
-            )
+            try:
+                await db.execute(
+                    """
+                    INSERT INTO discovery_results
+                    (id, run_id, query, title, url, domain, result_class, reason, location_status, location_evidence, product_class, product_class_evidence)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (res_id, run_id, query, title, url, domain, result_class, reason, location_status, location_evidence, product_class, product_class_evidence),
+                )
+            except Exception:
+                await db.execute(
+                    """
+                    INSERT INTO discovery_results
+                    (id, run_id, query, title, url, domain, result_class, reason, location_status, location_evidence)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (res_id, run_id, query, title, url, domain, result_class, reason, location_status, location_evidence),
+                )
             await db.commit()
         return res_id
 
@@ -5635,6 +5670,27 @@ class StateManager:
                 (location_status, location_evidence, location_evidence_url, _utcnow().isoformat(), company_id),
             )
             await db.commit()
+
+    async def update_company_product_class(
+        self,
+        company_id: str,
+        product_class: str,
+        product_class_evidence: str = "",
+    ) -> None:
+        """Update a company's software product vs services classification and evidence."""
+        async with self._connect() as db:
+            try:
+                await db.execute(
+                    """
+                    UPDATE companies
+                    SET product_class = ?, product_class_evidence = ?, updated_at = ?
+                    WHERE id = ?
+                    """,
+                    (product_class, product_class_evidence, _utcnow().isoformat(), company_id),
+                )
+                await db.commit()
+            except Exception as e:
+                logger.debug("Failed updating company product class for %s: %s", company_id, e)
 
     # ── Batch Research (Milestone 4) ──
 
@@ -5676,6 +5732,16 @@ class StateManager:
             async with db.execute("SELECT * FROM import_batches WHERE id = ?", (batch_id,)) as cur:
                 row = await cur.fetchone()
                 return dict(row) if row else None
+
+    async def list_import_batches(self, limit: int = 50) -> list[dict[str, Any]]:
+        """List recent import batches ordered by created_at DESC."""
+        async with self._connect() as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(
+                "SELECT * FROM import_batches ORDER BY created_at DESC LIMIT ?", (limit,)
+            ) as cur:
+                rows = await cur.fetchall()
+                return [dict(r) for r in rows]
 
     async def update_import_batch_status(
         self,
