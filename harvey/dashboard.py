@@ -948,7 +948,15 @@ async def api_export_research_batch(batch_id: str, request: Request):
         target = request.query_params.get("type", "contacts").lower()
 
         if export_format == "html" or target == "html":
-            from scripts.make_demo_report import generate_html_report
+            try:
+                from scripts.make_demo_report import generate_html_report
+            except ImportError:
+                import sys
+                from pathlib import Path
+                root = str(Path(__file__).resolve().parent.parent)
+                if root not in sys.path:
+                    sys.path.insert(0, root)
+                from scripts.make_demo_report import generate_html_report
             db_file = str(state.db_path)
             html_path = generate_html_report(db_path=db_file, batch_id=batch_id)
             return FileResponse(
