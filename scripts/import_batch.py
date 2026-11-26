@@ -12,6 +12,7 @@ from harvey.batch_research import (
     create_batch_from_file,
     export_batch_results,
     mask_email,
+    mask_name,
     mask_phone,
     run_batch,
 )
@@ -60,7 +61,8 @@ async def cmd_create(args: argparse.Namespace) -> None:
     print("Sample Validated Rows (PII Masked):")
     for r in res["preview"]:
         hint_str = f" | Entity: {r['company_name_hint']}" if r.get("company_name_hint") else ""
-        print(f"  Row {r['row_number']}: {r['name'] or '[NO NAME]'}{hint_str} | {r['email_masked']} | {r['phone_masked']} | {r['domain']} | {r['row_status']} {r['error']}")
+        masked_n = r.get("name_masked") or mask_name(r.get("name"))
+        print(f"  Row {r['row_number']}: {masked_n or '[NO NAME]'}{hint_str} | {r['email_masked']} | {r['phone_masked']} | {r['domain']} | {r['row_status']} {r['error']}")
     print("=======================================================\n")
     print(f"To run batch: python scripts/import_batch.py run {res['batch_id']} --max-domains {args.max_domains}")
 
@@ -126,6 +128,8 @@ async def cmd_export(args: argparse.Namespace) -> None:
         batch_id=args.batch_id,
         state=st,
         export_dir=args.output_dir,
+        unmask=args.unmask,
+        mask_names=not args.unmask,
     )
     print("\n=======================================================")
     print("                  EXPORT COMPLETED                     ")
@@ -159,6 +163,7 @@ def main() -> None:
     p_export = subparsers.add_parser("export", help="Export batch results to CSV")
     p_export.add_argument("batch_id", help="Batch ID")
     p_export.add_argument("--output-dir", default="data/exports", help="Output directory (default: data/exports)")
+    p_export.add_argument("--unmask", action="store_true", help="Unmask email, phone, and contact names (default: False, masked)")
 
     args = parser.parse_args()
 

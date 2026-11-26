@@ -241,7 +241,7 @@ def generate_html_report(
         if clean_people:
             p_rows = []
             for p in clean_people:
-                p_name = p.get("full_name", "") if unmask else "[NAME]"
+                p_name = p.get("full_name", "") if unmask else mask_name(p.get("full_name", ""))
                 p_title = p.get("title", "")
                 p_stat = p.get("verification_status", "")
                 p_src = p.get("source_url", "")
@@ -337,7 +337,7 @@ def generate_html_report(
     if free_mail_rows:
         fm_items = []
         for r in free_mail_rows:
-            c_name = r.get("raw_name", "") if unmask else ("[NAME]" if r.get("raw_name") else "[COMPANY ONLY]")
+            c_name = r.get("raw_name", "") if unmask else (mask_name(r.get("raw_name", "")) if r.get("raw_name") else "[COMPANY ONLY]")
             c_email = r.get("raw_email", "") if unmask else mask_email(r.get("raw_email", ""))
             c_phone = r.get("raw_phone", "") if unmask else mask_phone(r.get("raw_phone", ""))
             c_hint = r.get("company_name_hint", "")
