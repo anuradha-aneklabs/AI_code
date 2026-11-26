@@ -1,0 +1,128 @@
+[
+  {
+    "scenario": 1,
+    "name": "Single Company Research (cargill.com)",
+    "status": "PASS",
+    "elapsed_seconds": 15.21,
+    "details": {
+      "domain": "cargill.com",
+      "run_id": "410447610207",
+      "website_status": "verified",
+      "final_url": "https://www.cargill.com/",
+      "pages_crawled": 8,
+      "decision_makers_count": 5
+    }
+  },
+  {
+    "scenario": 2,
+    "name": "Excel Multi-Domain Import",
+    "status": "PASS",
+    "elapsed_seconds": 54.77,
+    "details": {
+      "batch_id": "eda6c9ebe333",
+      "total_rows": 8,
+      "unique_domains": 5,
+      "completed_domains": 2,
+      "batch_status": "completed"
+    }
+  },
+  {
+    "scenario": 3,
+    "name": "Industry & Software Product Classification",
+    "status": "PASS",
+    "elapsed_seconds": 0.0,
+    "details": {
+      "saas_classification": "software_product",
+      "agency_classification": "software_services",
+      "commodity_classification": "other"
+    }
+  },
+  {
+    "scenario": 4,
+    "name": "Geography & Multi-Part TLD Handling",
+    "status": "PASS",
+    "elapsed_seconds": 0.0,
+    "details": {
+      "co_in_same": true,
+      "co_in_diff": true,
+      "co_uk_same": true,
+      "cross_tld_diff": true,
+      "idn_punycode": "xn--mller-kva.de"
+    }
+  },
+  {
+    "scenario": 5,
+    "name": "Invalid & Duplicate Records Handling",
+    "status": "PASS",
+    "elapsed_seconds": 6.56,
+    "details": {
+      "row_statuses": [
+        "valid",
+        "duplicate_domain",
+        "free_mail",
+        "invalid_email",
+        "invalid_email"
+      ],
+      "enqueued_domains": [
+        "alpha-corp-test.com"
+      ]
+    }
+  },
+  {
+    "scenario": 6,
+    "name": "Blocked Website / Bot Challenge Fast Abort",
+    "status": "PASS",
+    "elapsed_seconds": 0.52,
+    "details": {
+      "verification_status": "unavailable",
+      "http_status": 403,
+      "evidence_text": "bot_challenge: HTTP 403 (Cloudflare/Bot challenge)",
+      "short_circuit_seconds": 0.52
+    }
+  },
+  {
+    "scenario": 7,
+    "name": "Interruption & Crash Recovery",
+    "status": "PASS",
+    "elapsed_seconds": 19.54,
+    "details": {
+      "initial_crash_status": "running",
+      "reconciled_status": "interrupted",
+      "final_resumed_status": "partial"
+    }
+  },
+  {
+    "scenario": 8,
+    "name": "API Polling Safety & Dashboard Integration",
+    "status": "PASS",
+    "elapsed_seconds": 0.07,
+    "details": {
+      "api_health": 200,
+      "batches_listed": 13
+    }
+  },
+  {
+    "scenario": 9,
+    "name": "UI and Database Consistency",
+    "status": "PASS",
+    "elapsed_seconds": 0.05,
+    "details": {
+      "row_count_match": true,
+      "domain_count_match": true,
+      "verified_sites_match": true
+    }
+  },
+  {
+    "scenario": 10,
+    "name": "CSV and HTML Export Verification",
+    "status": "PASS",
+    "elapsed_seconds": 0.13,
+    "details": {
+      "csv_rows": 3,
+      "contacts_csv": "contacts_results_e297b76c5ee1.csv",
+      "decision_makers_csv": "decision_makers_e297b76c5ee1.csv",
+      "html_bytes": 14682,
+      "html_valid": true
+    }
+  }
+]

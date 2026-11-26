@@ -33,6 +33,9 @@ _REAL_DB = _PROJECT_ROOT / "data" / "harvey.db"
 
 def pytest_configure(config):
     """Called once, before any fixture or test, before tests/conftest.py."""
+    # Under pytest, set test-mode flag so tests with mock/stub transports run
+    os.environ.setdefault("HARVEY_TEST_MODE", "1")
+    os.environ.setdefault("HARVEY_TEST_MOCK_SEND_ALLOWED", "1")
     if os.environ.get("HARVEY_DB_PATH"):
         # Already set by the caller — honour it; don't double-redirect.
         return

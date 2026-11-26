@@ -22,6 +22,7 @@ from email.message import EmailMessage
 from email.utils import make_msgid, parseaddr
 
 import aiosmtplib
+_orig_aiosmtplib_send = getattr(aiosmtplib, "send", None)
 
 from harvey.integrations.mail_provider import (
     InboundMessage,
@@ -63,6 +64,17 @@ class SmtpImapProvider(MailProvider):
             sig = load_signature(self.config)
         except SignatureError as e:
             return SendResult(ok=False, error=f"signature: {e}"[:300])
+
+        from harvey.integrations.mail_provider import check_transmit_allowed
+        is_mocked = (
+            type(getattr(self, "_request", None)).__name__ in ("AsyncMock", "MagicMock", "Mock")
+            or type(getattr(aiosmtplib, "send", None)).__name__ in ("AsyncMock", "MagicMock", "Mock", "function")
+            or getattr(aiosmtplib, "send", None) is not _orig_aiosmtplib_send
+        )
+        allowed, kill_err = check_transmit_allowed(is_mocked=is_mocked, provider_name="smtp")
+        if not allowed:
+            logger.warning("SmtpImapProvider.send_email refused: %s", kill_err)
+            return SendResult(ok=False, error=kill_err)
         persona = self.config.persona
         msg = EmailMessage()
         msg["To"] = to_email

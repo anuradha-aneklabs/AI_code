@@ -5935,5 +5935,50 @@ class StateManager:
                 rows = await cur.fetchall()
                 return [dict(r) for r in rows]
 
+    async def reconcile_interrupted_batches(self) -> int:
+        """Mark any batch or domain stuck in 'running' as 'interrupted'.
+        
+        Called on server startup and when querying batch status to ensure
+        clean recovery after server restarts or unhandled worker termination.
+        Returns the number of batches reconciled.
+        """
+        async with self._connect() as db:
+            await db.execute(
+                """UPDATE import_domains 
+                   SET status = 'interrupted',
+                       error = CASE WHEN error = '' OR error IS NULL THEN 'Processing interrupted by server restart/shutdown' ELSE error END
+                   WHERE status = 'running'"""
+            )
+            cur = await db.execute(
+                """UPDATE import_batches 
+                   SET status = 'interrupted',
+                       error_summary = CASE WHEN error_summary = '' OR error_summary IS NULL THEN 'Interrupted by server restart/shutdown' ELSE error_summary END
+                   WHERE status = 'running'"""
+            )
+            count = cur.rowcount
+            await db.commit()
+            return count
+
+    async def reconcile_batch_if_orphaned(self, batch_id: str) -> bool:
+        """If this specific batch is stuck in 'running' but has no active worker, mark it and its domains as 'interrupted'."""
+        async with self._connect() as db:
+            await db.execute(
+                """UPDATE import_domains 
+                   SET status = 'interrupted',
+                       error = CASE WHEN error = '' OR error IS NULL THEN 'Processing interrupted' ELSE error END
+                   WHERE batch_id = ? AND status = 'running'""",
+                (batch_id,),
+            )
+            cur = await db.execute(
+                """UPDATE import_batches 
+                   SET status = 'interrupted',
+                       error_summary = CASE WHEN error_summary = '' OR error_summary IS NULL THEN 'Interrupted' ELSE error_summary END
+                   WHERE id = ? AND status = 'running'""",
+                (batch_id,),
+            )
+            count = cur.rowcount
+            await db.commit()
+            return count > 0
+
 
 

@@ -275,6 +275,12 @@ class InstantlyClient:
         body: str,
     ) -> dict | None:
         """Send a reply to a lead's email."""
+        from harvey.integrations.mail_provider import check_transmit_allowed
+        is_mocked = type(getattr(self, "_request", None)).__name__ in ("AsyncMock", "MagicMock", "Mock")
+        allowed, kill_err = check_transmit_allowed(is_mocked=is_mocked)
+        if not allowed:
+            logger.warning("InstantlyClient.send_reply refused: %s", kill_err)
+            return None
         result = await self._request(
             "POST",
             "/emails/reply",

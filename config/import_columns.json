@@ -7,6 +7,11 @@
     "contact email",
     "work email",
     "email_address",
+    "primary email",
+    "primary_email",
+    "corporate email",
+    "business email",
+    "e_mail",
     "mail"
   ],
   "name": [
@@ -15,15 +20,19 @@
     "full_name",
     "contact name",
     "contact_name",
+    "contact",
     "person",
     "lead name",
+    "lead_name",
     "first and last name"
   ],
   "first_name": [
     "first name",
     "firstname",
     "first_name",
-    "first"
+    "first",
+    "given name",
+    "given_name"
   ],
   "middle_name": [
     "middle name",
@@ -38,7 +47,9 @@
     "lastname",
     "last_name",
     "last",
-    "surname"
+    "surname",
+    "family name",
+    "family_name"
   ],
   "suffix": [
     "suffix",
@@ -52,8 +63,14 @@
     "licensee",
     "business name",
     "company name",
+    "company_name",
     "entity_name",
-    "business_name"
+    "business_name",
+    "account name",
+    "account_name",
+    "account",
+    "company_legal_name",
+    "business"
   ],
   "phone": [
     "phone",
@@ -61,7 +78,12 @@
     "contact number",
     "phone number",
     "phone_number",
+    "phone no",
+    "phone_no",
+    "cellphone",
+    "cell_phone",
     "telephone",
+    "tel",
     "cell"
   ]
 }

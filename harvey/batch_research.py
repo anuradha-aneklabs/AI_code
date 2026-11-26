@@ -53,7 +53,14 @@ def mask_name(name: str | None) -> str:
     parts = [p.strip() for p in str(name).strip().split() if p.strip()]
     if not parts:
         return "—"
-    return " ".join(f"{p[0].upper()}." for p in parts)
+    valid_initials = []
+    for p in parts:
+        alpha = re.sub(r"[^A-Za-z]", "", p)
+        if alpha:
+            valid_initials.append(f"{alpha[0].upper()}.")
+    if not valid_initials:
+        return "—"
+    return " ".join(valid_initials)
 
 
 def mask_email(email: str) -> str:
@@ -374,7 +381,7 @@ async def create_batch_from_file(
             })
             continue
 
-        val_res = validate_and_normalize_email(raw_email, free_mail_domains)
+        val_res = validate_and_normalize_email(raw_email, free_mail_domains, lookup_mx=False)
         if not val_res.valid_syntax:
             validated_rows.append({
                 "id": _new_id(),
@@ -787,12 +794,18 @@ async def run_batch(
 
     finished_at = _utcnow()
     total_processed = completed_count + failed_count
-    if failed_count == 0:
-        batch_final_status = "completed"
-    elif completed_count > 0:
-        batch_final_status = "partial"
+
+    # Check overall domain statuses across the entire batch
+    all_domains = await state.get_import_domains(batch_id)
+    has_pending_or_interrupted = any(d.get("status") in ("pending", "interrupted", "running") for d in all_domains)
+    has_failed = any(d.get("status") == "failed" for d in all_domains)
+
+    if has_pending_or_interrupted:
+        batch_final_status = "partial" if completed_count > 0 else "interrupted"
+    elif has_failed:
+        batch_final_status = "partial" if completed_count > 0 else "failed"
     else:
-        batch_final_status = "failed"
+        batch_final_status = "completed"
 
     await state.update_import_batch_status(
         batch_id,
@@ -817,6 +830,7 @@ async def export_batch_results(
     state: StateManager,
     export_dir: str | Path = "data/exports",
     unmask: bool = False,
+    mask_names: bool | None = None,
 ) -> dict[str, str]:
     """Export batch results to CSV files in data/exports/.
     
@@ -824,6 +838,7 @@ async def export_batch_results(
     1. contacts_results_<batch_id>.csv
     2. decision_makers_<batch_id>.csv
     """
+    should_mask_names = mask_names if mask_names is not None else False
     await state.init_db()
     batch = await state.get_import_batch(batch_id)
     if not batch:
@@ -1108,7 +1123,7 @@ async def export_batch_results(
 
             out_row = {
                 "row_number": r["row_number"],
-                "name": r["raw_name"],
+                "name": r["raw_name"] if (unmask or not should_mask_names) else mask_name(r["raw_name"]),
                 "email": r["raw_email"] if unmask else mask_email(r["raw_email"]),
                 "phone": r["raw_phone"] if unmask else mask_phone(r["raw_phone"]),
                 "row_status": r_stat,

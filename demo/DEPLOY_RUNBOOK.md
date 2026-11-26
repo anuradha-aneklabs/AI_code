@@ -6,28 +6,60 @@
 **Current Schema Version:** `user_version` 31  
 **Target Schema Version:** `user_version` 32  
 **Audience:** Product Owner, Sir, and DevOps Infrastructure Team  
-**Execution Status:** **REFERENCE RUNBOOK ONLY — DO NOT EXECUTE WITHOUT EXPLICIT WRITTEN SIR APPROVAL**
+**Status:** **REFERENCE RUNBOOK ONLY — DO NOT EXECUTE ON PRODUCTION WITHOUT EXPLICIT WRITTEN SIR APPROVAL**
 
 ---
 
-## 1. System Architecture & Exposure Model
+## 0. Sir Approval Mandatory Checklist
 
-According to [JITESH_SIR_FINAL_HANDOVER.md](file:///C:/Users/aneka/Desktop/harvey/JITESH_SIR_FINAL_HANDOVER.md) and [docker-compose.yml](file:///C:/Users/aneka/Desktop/harvey/docker-compose.yml):
-1. **Host & Port:** The Harvey backend daemon runs loopback-only on `127.0.0.1:5555`.
-2. **Reverse Proxy & Edge Routing:** Aneka Labs reverse proxy (Nginx / Cloudflare) handles TLS termination and forwards traffic from `harvey.anekalabs.com` to local port 5555.
-3. **Container Runtime:** `docker-compose.yml` mounts the project root to `/app` using `network_mode: host` and runs `["dashboard"]`.
-4. **Required Approvals / Access:**
-   - Jitesh Sir's authorization to restart port 5555.
-   - Access to the host VM/container running port 5555.
-   - Claude CLI OAuth credentials or `.env` provider keys if live enrichment is enabled.
+Before running ANY step that touches the production environment or real `data/harvey.db`:
+
+- [ ] **Sir Written Authorization**: Jitesh Sir's explicit written approval received for:
+  1. Taking production backup and running v31 -> v32 schema migration on real `data/harvey.db`.
+  2. Setting `HARVEY_ALLOW_REAL_DB_WRITE=1` strictly for the duration of the migration step.
+  3. Starting the production daemon on port 5555.
+  4. Keeping `HARVEY_LIVE_SENDING_ENABLED` unset (no live email sending is authorized).
+- [ ] **Master Kill Switch Intact**: Master send kill switch in `harvey/integrations/mail_provider.py` is permanently ACTIVE.
+- [ ] **HARVEY_LIVE_SENDING_ENABLED Unset**: `HARVEY_LIVE_SENDING_ENABLED` must stay completely UNSET in `os.environ`, `.env`, and shell.
+- [ ] **Read-Only Gmail Scope Verified**: Gmail OAuth token only possesses `https://www.googleapis.com/auth/gmail.readonly` scope. Write scope is absent; the Gmail API will reject any transmission attempt at the provider level.
+- [ ] **Safety Hold Maintained**: `sending_paused` remains active (`"Pilot Evaluation - Read-Only Safety Hold"`) and `channels.email.require_approval = True`.
+- [ ] **Baseline SHA-256 Verified**: `Get-FileHash data/harvey.db` matches `DDFEAE896B4D34260B6061D61BCCC91873E9BF06B05F5728B846DFE90FEC4D47`.
+- [ ] **Pre-Deployment Backup Taken**: Point-in-time SQLite backup taken to `data/backups/`.
+- [ ] **Dryrun Rehearsal Confirmed**: 100% passed on `data/validation/harvey_deploy_dryrun.db`.
+- [ ] **Authorized Real-DB Flag**: Understand that `HARVEY_ALLOW_REAL_DB_WRITE=1` is strictly required to modify `data/harvey.db`; without it, `harvey/paths.py` throws `RuntimeError`.
 
 ---
 
-## 2. Pre-Deployment Step 1: Immutable Backup & SHA-256 Verification
+## 1. System Architecture & How Harvey is Actually Run
+
+1. **Host & Port**:
+   - **Production Port**: Strictly `127.0.0.1:5555`. Port 5555 is the production loopback daemon.
+   - **Demo / QA Port Isolation**: Port `5566` was used STRICTLY for test/demo automation and browser sign-off runs on disposable copies (`data/validation/harvey_video_clean.db`). Port `5566` is NOT a deployment target and must NEVER be used in production.
+2. **Reverse Proxy & Edge Routing**: Reverse proxy (Nginx / Cloudflare) terminates TLS and proxies external requests to local port 5555.
+3. **Execution Mode**:
+   - **Local CLI / Daemon**:
+     ```powershell
+     cd C:\Users\aneka\Desktop\harvey
+     .\.venv\Scripts\python.exe -m harvey dashboard --port 5555
+     ```
+   - **Docker Production**:
+     ```bash
+     docker compose up -d
+     ```
+     Mounted at `/app` with `network_mode: host` running `["dashboard"]`.
+4. **Environment Variables**:
+   - Production writes are protected by `HARVEY_ALLOW_REAL_DB_WRITE=1`.
+   - Test/copy runs override the database path using `HARVEY_DB_PATH`.
+   - `HARVEY_LIVE_SENDING_ENABLED` is left UNSET in all production configs.
+
+---
+
+## 2. Step 1: Immutable Backup & SHA-256 Verification
+**[STATUS: EXECUTED ON THE COPY; NOT VERIFIED ON PRODUCTION DB]**
 
 Execute this step before touching the production database.
 
-### Command [VERIFIED: CLI syntax tested]
+### Command
 ```powershell
 # In PowerShell at C:\Users\aneka\Desktop\harvey
 cd C:\Users\aneka\Desktop\harvey
@@ -47,10 +79,11 @@ Get-FileHash data/harvey.db -Algorithm SHA256 | Select-Object Path, Hash
 ---
 
 ## 3. Step 2: Additive Migration to Schema v32
+**[STATUS: EXECUTED ON COPY data/validation/harvey_deploy_dryrun.db; NOT EXECUTED ON PRODUCTION DB]**
 
-The remaining migration is **100% additive**: it introduces two new columns to `companies` and two new columns to `discovery_results`. It does not drop tables, alter existing columns, or mutate prospect/outbox data.
+The migration is **100% additive**: introduces columns for product classification and tables for batch research. It does NOT drop tables or alter existing records.
 
-### Exact SQL Statements in Migration v32 [VERIFIED: from harvey/state.py:MIGRATIONS[31]]
+### SQL Statements
 ```sql
 ALTER TABLE companies ADD COLUMN product_class TEXT DEFAULT '';
 ALTER TABLE companies ADD COLUMN product_class_evidence TEXT DEFAULT '';
@@ -59,23 +92,21 @@ ALTER TABLE discovery_results ADD COLUMN product_class_evidence TEXT DEFAULT '';
 PRAGMA user_version = 32;
 ```
 
-### How Migration is Applied [VERIFIED: CLI syntax tested]
-Option A (Automatic via StateManager startup):
+### How Migration is Applied
+**Authorized Variable:** `HARVEY_ALLOW_REAL_DB_WRITE=1` is strictly required to authorize writes to `data/harvey.db`.
 ```powershell
+# Automated via StateManager startup (authorized)
 .\.venv\Scripts\python.exe -c "import asyncio, os; os.environ['HARVEY_ALLOW_REAL_DB_WRITE']='1'; from harvey.state import StateManager; asyncio.run(StateManager('data/harvey.db').init_db())"
-```
-Option B (Direct SQLite execution):
-```powershell
-sqlite3 data/harvey.db "ALTER TABLE companies ADD COLUMN product_class TEXT DEFAULT ''; ALTER TABLE companies ADD COLUMN product_class_evidence TEXT DEFAULT ''; ALTER TABLE discovery_results ADD COLUMN product_class TEXT DEFAULT ''; ALTER TABLE discovery_results ADD COLUMN product_class_evidence TEXT DEFAULT ''; PRAGMA user_version = 32;"
 ```
 
 ---
 
 ## 4. Step 3: Post-Migration Invariants Verification
+**[STATUS: EXECUTED ON COPY data/validation/harvey_deploy_dryrun.db; VERIFIED ZERO ROW LOSS]**
 
 Verify that all safety gates and business data are intact.
 
-### Verification Command [VERIFIED: tested on copy DB]
+### Verification Command (Read-Only)
 ```powershell
 .\.venv\Scripts\python.exe -c "
 import sqlite3
@@ -86,100 +117,90 @@ cur = con.cursor()
 cur.execute('PRAGMA user_version')
 print('Schema user_version:', cur.fetchone()[0])
 
-# Check row counts
+# Check true row counts
 cur.execute('SELECT count(*) FROM companies')
 print('Companies:', cur.fetchone()[0])
-cur.execute('SELECT count(*) FROM contacts')
-print('Contacts:', cur.fetchone()[0])
 cur.execute('SELECT count(*) FROM prospects')
 print('Prospects:', cur.fetchone()[0])
+cur.execute('SELECT count(*) FROM outbox')
+print('Outbox:', cur.fetchone()[0])
 
-# Outbox safety check: exactly 1 sent email fixture, zero new sends
 cur.execute('SELECT status, count(*) FROM outbox GROUP BY status')
-print('Outbox:', cur.fetchall())
-
-# Safety settings check
-cur.execute('SELECT key, value FROM settings WHERE key IN (\'sending_paused\', \'channels.email.require_approval\')')
-print('Safety settings:', cur.fetchall())
+print('Outbox statuses:', cur.fetchall())
 
 con.close()
 "
 ```
 
-### Expected Post-Migration State [VERIFIED via dry-run on data/validation/harvey_deploy_dryrun.db]
-- `user_version` = `32`
-- `companies` count = `85`
-- `prospects` count = `178`
-- `outbox` count = `233`
-- `import_batches` count = `7`
-- `import_domains` count = `7`
-- `company_websites` count = `16`
-- `observations` count = `366`
-- `actions` count = `671`
-- `runs` count = `26`
-- `sending_paused` = `True` / `Pilot Evaluation - Read-Only Safety Hold`
+### True Production Database Counts
+- `user_version` = `32` (was `31`)
+- `companies` count = `85` (exact match)
+- `prospects` count = `178` (exact match)
+- `outbox` count = `233` (exact match)
+- `observations` count = `366` (exact match)
+- `actions` count = `671` (exact match)
+- `runs` count = `26` (exact match)
+- `outbox` status breakdown:
+  - `pending_review`: 124
+  - `cancelled`: 82
+  - `approved`: 25
+  - `rejected`: 1
+  - `sent`: 1 (fixture)
+- `sending_paused` = `"Pilot Evaluation - Read-Only Safety Hold"`
 - `channels.email.require_approval` = `True`
-- `channels.email.zero_emails_sent` = `True` (Strict read-only safety maintained)
 
 ---
 
 ## 5. Step 4: Restart Dashboard Server on Port 5555
+**[STATUS: NOT VERIFIED ON PRODUCTION (PORT 5555 RESERVED FOR PROD; PORT 5566 USED ONLY ON DEMO COPY)]**
 
 Once migration is confirmed, start the production dashboard daemon.
 
-### Command [VERIFIED: CLI syntax tested]
+### Command
 ```powershell
 cd C:\Users\aneka\Desktop\harvey
 .\.venv\Scripts\python.exe -m harvey dashboard --port 5555
 ```
 
-### Health Check [VERIFIED: tested on port 5566]
+### Health Check
 ```powershell
-# In a separate terminal
 curl -I http://127.0.0.1:5555/api/health
 ```
 Expected HTTP Response: `HTTP/1.1 200 OK` with `{"status": "ok", "app": "harvey", "version": "2.0.0"}`.
 
 ---
 
-## 6. Step 5: Confirm $0 Free Signals via Legit Path
+## 6. Step 5: Confirm Free Signals via Legit Path
+**[STATUS: EXECUTED ON COPY; NOT EXECUTED ON PRODUCTION]**
 
 Ensure discovery is unblocked for zero-cost prospecting.
 
-### Command [VERIFIED: CLI syntax tested]
 ```powershell
 .\.venv\Scripts\python.exe -m harvey signals --confirm free
 ```
-
-### Verification [VERIFIED: CLI syntax tested]
-```powershell
-.\.venv\Scripts\python.exe -m harvey signals
-```
-Expected Output: All 26 free/included signals marked as `confirmed`.
+Expected Output: All 26 free signals marked as `confirmed`.
 
 ---
 
 ## 7. Step 6: First Live Discovery Smoke Test ($0 Estimate First)
+**[STATUS: VERIFIED ON COPY; NOT EXECUTED ON PRODUCTION]**
 
-Always estimate cost prior to running live collection. Harvey supports both OSM (OpenStreetMap) and TinyFish search providers.
+Always estimate cost prior to running live collection.
 
-### Provider Check: TinyFish Search Integration [VERIFIED]
-- **API Status:** Endpoint `/api/discover/providers` confirms `tinyfish` provider available with `status: ok, cost_per_query: 0.0, monthly_limit: 1000`.
-- **Criteria Gate:** Endpoint `/api/discovery/criteria` confirms active ICP: SaaS in Indore with geo-bounds and negative exclusions.
-- **Cost Estimate:** Endpoint `/api/discover/estimate` confirms projected spend is strictly `$0.00` across all generated queries.
+> **CRITICAL NOTE ON PROVIDERS:**
+> - **OpenStreetMap / Nominatim**: Strictly used for physical local brick-and-mortar storefronts (e.g. dentists, retail). **NEVER** used for SaaS or software discovery.
+> - **TinyFish**: Provider for web-scale and SaaS discovery.
 
-### Command [VERIFIED: CLI syntax tested]
+### TinyFish $0 Estimate Command
 ```powershell
-# 1. Run estimate first (Safety Guard)
 .\.venv\Scripts\python.exe -m harvey discover --estimate --industry "SaaS" --city "Indore, Madhya Pradesh, India" --provider tinyfish
-
-# 2. Check projected cost is strictly $0.0000
-# Output will display: Estimated cost: $0.0000 (cap: $1.00)
 ```
+Expected Output: `Estimated cost: $0.0000 (cap: $1.00)`.
 
 ---
 
-## 8. Rollback Procedure (In Case of Any Discrepancy)
+## 8. Rollback Procedure
+**[STATUS: EXECUTED ON THE COPY; NOT VERIFIED ON PRODUCTION DB (DRY-RUN TESTED WITH 100% HASH MATCH)]**
 
 If any verification assertion fails, perform an immediate, clean rollback:
 

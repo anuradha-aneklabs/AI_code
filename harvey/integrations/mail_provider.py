@@ -147,6 +147,32 @@ class MailProvider(ABC):
         """Cheap end-to-end credential check. Returns (ok, detail)."""
 
 
+def check_transmit_allowed(is_mocked: bool = False, provider_name: str = "") -> tuple[bool, str]:
+    """Lowest-level master kill switch for email transmission.
+    
+    Default: Live email transmission is STRICTLY DISABLED at code level.
+    No live message transmission can occur regardless of outbox status, approval flags,
+    require_approval, sending_paused, or daily limits, unless HARVEY_LIVE_SENDING_ENABLED
+    is explicitly set to '1', 'true', or 'yes'.
+    
+    Under pytest, test transports (fakes, mocks, stubs) are permitted when
+    HARVEY_TEST_MODE is active, but live unmocked sends are still blocked unless
+    HARVEY_LIVE_SENDING_ENABLED is set.
+    """
+    import os
+    if os.environ.get("HARVEY_LIVE_SENDING_ENABLED", "").lower() in ("true", "1", "yes"):
+        return True, ""
+
+    test_mode = os.environ.get("HARVEY_TEST_MODE", "").lower() in ("true", "1", "yes")
+    mock_allowed = os.environ.get("HARVEY_TEST_MOCK_SEND_ALLOWED", "1") not in ("0", "false", "no")
+
+    if test_mode and mock_allowed:
+        if is_mocked or provider_name in ("fake", "stub", "test"):
+            return True, ""
+
+    return False, "Hard master kill switch active: email transmission is disabled by default. Set HARVEY_LIVE_SENDING_ENABLED=1 to enable."
+
+
 def get_mail_provider(config, env) -> MailProvider | None:
     """Build the configured native provider, or None for instantly/unknown."""
     provider = (config.channels.email.provider or "").strip().lower()

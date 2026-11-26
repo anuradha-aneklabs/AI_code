@@ -59,6 +59,7 @@ async def lifespan(app: FastAPI):
     try:
         state = _state()
         await state.init_db()
+        await state.reconcile_interrupted_batches()
     except Exception as e:
         logger.error(f"Dashboard startup DB initialization error: {e}")
     # Auto-start Harvey engine if configured via HARVEY_AUTOSTART_ENGINE
@@ -700,6 +701,10 @@ async def api_get_research_batch_status(batch_id: str):
             return JSONResponse({"success": False, "error": f"Batch '{batch_id}' not found"}, status_code=404)
         domains = await state.get_import_domains(batch_id)
         is_running = batch_id in _running_research_batches and not _running_research_batches[batch_id].done()
+        if not is_running and batch.get("status") == "running":
+            await state.reconcile_batch_if_orphaned(batch_id)
+            batch = await state.get_import_batch(batch_id)
+            domains = await state.get_import_domains(batch_id)
         return {"success": True, "batch": batch, "domains": domains, "is_running": is_running}
     except Exception as e:
         logger.exception("Failed to get batch %s", batch_id)
@@ -768,6 +773,11 @@ async def api_get_research_batch_details(batch_id: str):
         batch = await state.get_import_batch(batch_id)
         if not batch:
             return JSONResponse({"success": False, "error": f"Batch '{batch_id}' not found"}, status_code=404)
+
+        is_running = batch_id in _running_research_batches and not _running_research_batches[batch_id].done()
+        if not is_running and batch.get("status") == "running":
+            await state.reconcile_batch_if_orphaned(batch_id)
+            batch = await state.get_import_batch(batch_id)
 
         domains = await state.get_import_domains(batch_id)
         rows = await state.get_import_rows(batch_id)
@@ -905,7 +915,7 @@ async def api_get_research_batch_details(batch_id: str):
 
         valid_contacts = sum(1 for r in rows if r.get("row_status") in ("valid", "duplicate_domain"))
         companies_researched = sum(1 for d in domains if d.get("status") == "completed")
-        pending_failed = sum(1 for d in domains if d.get("status") in ("pending", "running", "failed"))
+        pending_failed = sum(1 for d in domains if d.get("status") in ("pending", "running", "failed", "interrupted"))
 
         metrics = {
             "total_contacts": len(rows),
@@ -946,6 +956,7 @@ async def api_export_research_batch(batch_id: str, request: Request):
 
         export_format = request.query_params.get("format", "").lower()
         target = request.query_params.get("type", "contacts").lower()
+        unmask = request.query_params.get("unmask", "").lower() in ("true", "1", "yes")
 
         if export_format == "html" or target == "html":
             try:
@@ -958,15 +969,19 @@ async def api_export_research_batch(batch_id: str, request: Request):
                     sys.path.insert(0, root)
                 from scripts.make_demo_report import generate_html_report
             db_file = str(state.db_path)
-            html_path = generate_html_report(db_path=db_file, batch_id=batch_id)
+            html_path = generate_html_report(db_path=db_file, batch_id=batch_id, unmask=unmask)
             return FileResponse(
                 path=html_path,
                 filename=f"research_report_{batch_id}.html",
                 media_type="text/html",
             )
 
-        unmask = request.query_params.get("unmask", "").lower() in ("true", "1", "yes")
-        export_paths = await export_batch_results(batch_id, state=state, unmask=unmask)
+        export_paths = await export_batch_results(
+            batch_id,
+            state=state,
+            unmask=unmask,
+            mask_names=not unmask,
+        )
         if target == "decision_makers":
             file_to_send = export_paths["decision_makers"]
             media_name = f"decision_makers_{batch_id}.csv"

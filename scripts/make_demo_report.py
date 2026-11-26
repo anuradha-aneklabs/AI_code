@@ -18,6 +18,23 @@ from pathlib import Path
 from typing import Any
 
 
+def mask_name(name: str | None) -> str:
+    """Mask personal name to initials (e.g. 'Rick Testa' -> 'R. T.')."""
+    if not name or not str(name).strip():
+        return "—"
+    parts = [p.strip() for p in str(name).strip().split() if p.strip()]
+    if not parts:
+        return "—"
+    valid_initials = []
+    for p in parts:
+        alpha = re.sub(r"[^A-Za-z]", "", p)
+        if alpha:
+            valid_initials.append(f"{alpha[0].upper()}.")
+    if not valid_initials:
+        return "—"
+    return " ".join(valid_initials)
+
+
 def mask_email(email: str) -> str:
     if not email or "@" not in email:
         return email
@@ -193,7 +210,7 @@ def generate_html_report(
         # Contact cards
         contacts_badges: list[str] = []
         for cr in dom_import_rows:
-            c_name = cr.get("raw_name", "") if unmask else ("[NAME]" if cr.get("raw_name") else "[COMPANY ONLY]")
+            c_name = cr.get("raw_name", "") if unmask else mask_name(cr.get("raw_name", ""))
             c_email = cr.get("raw_email", "") if unmask else mask_email(cr.get("raw_email", ""))
             c_phone = cr.get("raw_phone", "") if unmask else mask_phone(cr.get("raw_phone", ""))
             c_hint = cr.get("company_name_hint", "")

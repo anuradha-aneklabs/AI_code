@@ -327,6 +327,7 @@ class EmailValidationResult:
 def validate_and_normalize_email(
     email: str,
     free_mail_domains: set[str],
+    lookup_mx: bool = True,
 ) -> EmailValidationResult:
     """Validate email syntax (RFC 5322), check consumer mail list, and inspect MX."""
     raw = (email or "").strip()
@@ -358,7 +359,7 @@ def validate_and_normalize_email(
     )
     
     # Optional DNS MX resolution (informational only; never probe SMTP)
-    mx_info = _lookup_mx_records(raw_domain)
+    mx_info = _lookup_mx_records(raw_domain) if lookup_mx else None
     
     return EmailValidationResult(
         valid_syntax=True,
@@ -376,10 +377,15 @@ def _lookup_mx_records(domain: str) -> dict[str, Any] | None:
         answers = dns.resolver.resolve(domain, "MX", lifetime=3.0)
         records = sorted([(r.preference, str(r.exchange).rstrip(".")) for r in answers])
         if records:
-            return {"primary_mx": records[0][1], "preference": records[0][0], "count": len(records)}
-    except Exception:
-        pass
-    return None
+            return {
+                "status": "found",
+                "primary_mx": records[0][1],
+                "preference": records[0][0],
+                "count": len(records),
+            }
+        return {"status": "none_found", "count": 0, "reason": f"No MX records returned for {domain}"}
+    except Exception as e:
+        return {"status": "none_found", "count": 0, "reason": f"DNS MX lookup failed for {domain}: {type(e).__name__}"}
 
 
 # ── Stage 2: Domain Extraction ────────────────────────────────────────
@@ -570,6 +576,9 @@ async def verify_website(
                 if is_bot or http_status == 403:
                     last_error_code = "bot_challenge" if is_bot else "http_403"
                     last_error_detail = f"HTTP {http_status} (Cloudflare/Bot challenge)" if is_bot else f"HTTP {http_status} Forbidden"
+                    if is_bot:
+                        logger.info("Bot challenge / Cloudflare detected on %s; stopping further URL candidate retries.", cand_url)
+                        break
                 else:
                     last_error_code = f"http_{http_status}"
                     last_error_detail = f"HTTP {http_status}"

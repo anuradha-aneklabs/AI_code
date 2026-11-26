@@ -317,6 +317,13 @@ class GmailProvider(MailProvider):
             if not stored or not has_send_perm:
                 return SendResult(ok=False, error="Gmail token has read-only scope. Live sending is disabled. Re-authenticate to grant gmail.send.")
 
+        from harvey.integrations.mail_provider import check_transmit_allowed
+        allowed, kill_err = check_transmit_allowed(is_mocked=is_mocked, provider_name="gmail")
+        if not allowed:
+            logger.warning("GmailProvider.send_email refused: %s", kill_err)
+            return SendResult(ok=False, error=kill_err)
+
+        if not is_mocked:
             # Enforce controlled test sending allowlist
             import os
             from dotenv import dotenv_values

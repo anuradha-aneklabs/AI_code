@@ -296,6 +296,11 @@ class MicrosoftProvider(MailProvider):
             or type(getattr(self, "_request", None)).__name__ in ("AsyncMock", "MagicMock", "Mock")
             or type(getattr(self, "_token", None)).__name__ in ("AsyncMock", "MagicMock", "Mock")
         )
+        from harvey.integrations.mail_provider import check_transmit_allowed
+        allowed, kill_err = check_transmit_allowed(is_mocked=is_mocked)
+        if not allowed:
+            logger.warning("MicrosoftProvider.send_email refused: %s", kill_err)
+            return SendResult(ok=False, error=kill_err)
         if not is_mocked:
             # Enforce controlled test sending allowlist
             import os

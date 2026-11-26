@@ -29,7 +29,10 @@ from datetime import datetime, timezone
 from typing import Optional
 
 import dns.resolver
-import aiosmtplib
+try:
+    import aiosmtplib
+except ImportError:
+    aiosmtplib = None
 import httpx
 
 logger = logging.getLogger("harvey.email_finder")
@@ -799,6 +802,9 @@ async def verify_email_smtp(email: str) -> Optional[bool]:
     domain = email.rsplit("@", 1)[1]
     mx_host = await get_mx_host(domain)
     if not mx_host:
+        return None
+    if aiosmtplib is None:
+        logger.debug("aiosmtplib not installed; skipping SMTP verification")
         return None
     smtp = aiosmtplib.SMTP(hostname=mx_host, port=25, timeout=10)
     try:
